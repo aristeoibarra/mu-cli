@@ -4,125 +4,94 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`mu` is a minimal, high-performance local music player CLI for macOS. It downloads audio from YouTube (via yt-dlp), stores tracks in SQLite, and plays them via a background daemon using CoreAudio. All output is JSON for automation/scripting.
-
-**Design principles:**
-- Minimal resource usage (daemon: ~18MB RAM, 0% CPU idle)
-- No UI/TUI — runs in background, controlled via CLI
-- JSON output for easy parsing by scripts and AI tools
-- Unix-style daemon + client architecture via Unix domain sockets
+`mu` is a minimal local music player CLI for macOS. Downloads audio via yt-dlp, stores metadata in SQLite, plays via background daemon using CoreAudio. All output is JSON — designed to be controlled by Claude Code via Bash.
 
 ## Architecture
 
-### Process Model
-
 ```
-mu CLI (exits immediately)
-    ↓ Unix socket
-mu daemon (background process)
-    ↓ tokio async + dedicated audio thread
-rodio → CoreAudio (hardware audio)
+mu <command>  (CLI, exits immediately)
+    ↓ Unix domain socket (~/.../mu/mu.sock)
+mu daemon     (background process, auto-spawned by `mu play`)
+    ↓ mpsc channel
+audio thread  (rodio → CoreAudio)
 ```
 
-The daemon spawns automatically on first `mu play` and persists until `mu stop`.
+### Modules
 
-### Module Structure
-
-- **main.rs** - CLI command routing (clap), executes commands synchronously
-- **daemon.rs** - Background process: tokio async server + dedicated audio thread (rodio requires single-thread audio)
-- **client.rs** - Sends commands to daemon via Unix socket
-- **db.rs** - SQLite schema + migrations, auto-creates data dir
-- **downloader.rs** - Wraps yt-dlp subprocess, downloads mp3 (rodio doesn't support opus)
+- **main.rs** — CLI routing (clap). All command logic lives here.
+- **daemon.rs** — tokio async socket server + dedicated audio thread. Audio thread required because rodio's `OutputStream`/`Sink` are not `Send`.
+- **client.rs** — sends JSON commands to daemon via Unix socket, reads response.
+- **db.rs** — SQLite with WAL mode, foreign keys, auto-migration on open.
+- **downloader.rs** — wraps `yt-dlp` as subprocess. Downloads MP3 only (rodio v0.19 lacks opus support).
 
 ### Key Constraints
 
-1. **Audio must run on dedicated OS thread** - rodio's `OutputStream` and `Sink` are not `Send`. The daemon uses `std::thread::spawn` for audio, communicates via `mpsc::channel`.
+- **MP3 only** — rodio v0.19 doesn't support opus. Format hardcoded in `downloader.rs`.
+- **Daemon lifecycle** — auto-starts on `mu play`, killed by `mu stop`. PID in `mu.pid`, socket in `mu.sock`.
+- **All output is JSON** — success and errors. Exit code 0 = ok, 1 = error. This enables Claude Code to parse responses via Bash.
 
-2. **MP3 only** - rodio v0.19 supports mp3/wav/flac/ogg-vorbis natively. Opus requires `symphonia-opus` feature which isn't in v0.19. Download format hardcoded to mp3.
-
-3. **Daemon lifecycle** - Started by `mu play`, killed by `mu stop`. PID stored in `~/.local/share/mu/mu.pid`. Socket at `mu.sock`.
-
-## Build & Development
+## Build
 
 ```bash
-# Build release binary
 cargo build --release
-
-# Install to PATH
 cp target/release/mu /opt/homebrew/bin/mu
-
-# Run directly (dev)
-cargo run -- add "song name"
-cargo run -- play
 ```
 
-## Data Storage
+## Data
 
-- **Location**: `~/Library/Application Support/mu/` (macOS)
-- **Files**:
-  - `mu.db` - SQLite database (tracks, playlists, playlist_tracks)
-  - `mu.sock` - Unix domain socket for CLI ↔ daemon IPC
-  - `mu.pid` - Daemon process ID
-  - `tracks/` - Downloaded mp3 files
+Location: `~/Library/Application Support/mu/`
 
-### Database Schema
-
-```sql
-tracks (id, title, artist, duration_secs, file_path, source_url, added_at)
-playlists (id, name)
-playlist_tracks (playlist_id, track_id, position)
+```
+mu.db          SQLite (tracks, playlists, playlist_tracks)
+mu.sock        Unix socket (CLI ↔ daemon IPC)
+mu.pid         daemon PID
+tracks/        downloaded mp3 files
 ```
 
-Foreign keys cascade on delete. WAL mode enabled for concurrency.
+Schema: `tracks(id, title, artist, duration_secs, file_path, source_url, added_at)`, `playlists(id, name)`, `playlist_tracks(playlist_id, track_id, position)`. Foreign keys cascade on delete.
 
-## External Dependencies
-
-- **yt-dlp** (required) - Must be in PATH. Install: `brew install yt-dlp`
-- Downloads from YouTube, SoundCloud, 1000+ sites
-- Search syntax: plain text becomes `ytsearch1:query`, URLs passed directly
-
-## Common Commands
+## CLI Reference
 
 ```bash
-# Download and add to playlist
-mu add "lofi beats" --playlist work
+# Download
+mu add "song name or URL"              # search YouTube, download mp3
+mu add "song" --playlist focus          # download and add to playlist
 
-# Play with shuffle
-mu play work --shuffle
-
-# Control playback
+# Playback (daemon auto-starts)
+mu play                                 # play all tracks
+mu play focus                           # play playlist
+mu play focus --shuffle                 # shuffle order
 mu pause
 mu resume
 mu skip
-mu stop
+mu stop                                 # stop and kill daemon
 
-# Query state (JSON)
-mu status
-mu list
-mu list work
+# Query (JSON output)
+mu status                               # current track, playing/paused state
+mu list                                 # all tracks in library
+mu list focus                           # tracks in playlist
+
+# Playlists
+mu playlist create <name>
+mu playlist add <playlist> <track_id|title>
+mu playlist remove-track <playlist> <track_id|title>   # remove track from playlist only
+mu playlist remove <name>                               # delete entire playlist
 mu playlist list
+
+# Library
+mu remove <track_id|title>              # delete track from DB + disk
 ```
 
-## Adding New Features
+Track lookup accepts ID (integer) or title substring match.
 
-### Audio Format Support
+## Adding Features
 
-To add opus/aac/other formats:
-1. Update `Cargo.toml` rodio features or upgrade rodio version
-2. Change `downloader.rs:61` from `"mp3"` to desired format
-3. Test with `rodio::Decoder::new()` — it auto-detects but requires format support compiled in
+**New CLI command:** add variant to `Commands` enum + match arm in `main()` (both in `main.rs`).
 
-### Daemon Commands
+**New daemon command:** 3 places — `DaemonCmd` struct (add `#[serde(default)]` fields), `handle_command()` match arm, `PlayerMsg` enum if it touches audio state. All in `daemon.rs`.
 
-New daemon commands require changes in 3 places:
-1. `daemon.rs:DaemonCmd` struct - add fields with `#[serde(default)]`
-2. `daemon.rs:handle_command()` - add match arm
-3. `daemon.rs:PlayerMsg` enum - add variant if it affects audio thread state
+**New audio format:** upgrade rodio or add symphonia features in `Cargo.toml`, change format string in `downloader.rs`.
 
-### CLI Commands
+## External Dependency
 
-New CLI commands:
-1. `main.rs:Commands` enum - add variant
-2. `main.rs:main()` - add match arm with logic
-
-All commands should output JSON on success/error for consistency.
+`yt-dlp` must be in PATH (`brew install yt-dlp`). Plain text queries become `ytsearch1:<query>`, URLs pass through directly.

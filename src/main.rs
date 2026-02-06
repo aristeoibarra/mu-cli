@@ -51,6 +51,11 @@ enum Commands {
         #[command(subcommand)]
         action: PlaylistAction,
     },
+    /// Remove a track from library and disk
+    Remove {
+        /// Track ID or title substring
+        track: String,
+    },
     /// Run as daemon (internal)
     Daemon,
 }
@@ -68,6 +73,13 @@ enum PlaylistAction {
     },
     /// Remove a playlist
     Remove { name: String },
+    /// Remove a track from a playlist
+    RemoveTrack {
+        /// Playlist name
+        playlist: String,
+        /// Track ID or title substring
+        track: String,
+    },
     /// List all playlists
     List,
 }
@@ -398,6 +410,50 @@ fn main() {
                         .ok();
                     println!("{}", serde_json::json!({"ok": true, "removed": name}));
                 }
+                PlaylistAction::RemoveTrack { playlist, track } => {
+                    let pl_id: Result<i64, _> = conn.query_row(
+                        "SELECT id FROM playlists WHERE name = ?1",
+                        params![playlist],
+                        |row| row.get(0),
+                    );
+                    let pl_id = match pl_id {
+                        Ok(id) => id,
+                        Err(_) => {
+                            println!("{}", json_error("playlist not found"));
+                            std::process::exit(1);
+                        }
+                    };
+                    let track_id: Option<i64> = track
+                        .parse::<i64>()
+                        .ok()
+                        .or_else(|| {
+                            conn.query_row(
+                                "SELECT t.id FROM tracks t
+                                 JOIN playlist_tracks pt ON pt.track_id = t.id
+                                 WHERE pt.playlist_id = ?1 AND t.title LIKE '%' || ?2 || '%' LIMIT 1",
+                                params![pl_id, track],
+                                |row| row.get(0),
+                            )
+                            .ok()
+                        });
+                    match track_id {
+                        Some(tid) => {
+                            conn.execute(
+                                "DELETE FROM playlist_tracks WHERE playlist_id = ?1 AND track_id = ?2",
+                                params![pl_id, tid],
+                            )
+                            .ok();
+                            println!(
+                                "{}",
+                                serde_json::json!({"ok": true, "removed_track": tid, "playlist": playlist})
+                            );
+                        }
+                        None => {
+                            println!("{}", json_error("track not found in playlist"));
+                            std::process::exit(1);
+                        }
+                    }
+                }
                 PlaylistAction::List => {
                     let mut stmt = conn
                         .prepare(
@@ -417,6 +473,44 @@ fn main() {
                         .filter_map(|r| r.ok())
                         .collect();
                     println!("{}", serde_json::json!({"playlists": rows}));
+                }
+            }
+        }
+
+        Commands::Remove { track } => {
+            let conn = db::open(&db_path).expect("db open failed");
+            let row: Option<(i64, String)> = track
+                .parse::<i64>()
+                .ok()
+                .and_then(|id| {
+                    conn.query_row(
+                        "SELECT id, file_path FROM tracks WHERE id = ?1",
+                        params![id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .ok()
+                })
+                .or_else(|| {
+                    conn.query_row(
+                        "SELECT id, file_path FROM tracks WHERE title LIKE '%' || ?1 || '%' LIMIT 1",
+                        params![track],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .ok()
+                });
+            match row {
+                Some((tid, file_path)) => {
+                    conn.execute("DELETE FROM playlist_tracks WHERE track_id = ?1", params![tid]).ok();
+                    conn.execute("DELETE FROM tracks WHERE id = ?1", params![tid]).ok();
+                    let _ = std::fs::remove_file(&file_path);
+                    println!(
+                        "{}",
+                        serde_json::json!({"ok": true, "removed_id": tid, "file_deleted": file_path})
+                    );
+                }
+                None => {
+                    println!("{}", json_error("track not found"));
+                    std::process::exit(1);
                 }
             }
         }
