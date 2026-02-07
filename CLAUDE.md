@@ -61,6 +61,8 @@ mu add "song" --playlist focus          # download and add to playlist
 mu play                                 # play all tracks
 mu play focus                           # play playlist
 mu play focus --shuffle                 # shuffle order
+mu play --from <track_id|title>         # start from specific track
+mu play focus --from "song name"        # start playlist from specific track
 mu pause
 mu resume
 mu next                                 # skip to next track

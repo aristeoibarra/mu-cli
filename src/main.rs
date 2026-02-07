@@ -30,6 +30,9 @@ enum Commands {
         /// Shuffle tracks
         #[arg(short, long)]
         shuffle: bool,
+        /// Start from specific track (ID or title)
+        #[arg(long)]
+        from: Option<String>,
     },
     /// Pause playback
     Pause,
@@ -132,7 +135,7 @@ fn main() {
             }
         }
 
-        Commands::Play { playlist, shuffle } => {
+        Commands::Play { playlist, shuffle, from } => {
             let conn = db::open(&db_path).expect("db open failed");
 
             let (paths, titles): (Vec<String>, Vec<String>) = if let Some(ref pl_name) = playlist {
@@ -166,6 +169,38 @@ fn main() {
             if paths.is_empty() {
                 println!("{}", json_error("no tracks found"));
                 std::process::exit(1);
+            }
+
+            // Handle --from parameter to start from specific track
+            let (mut paths, mut titles) = (paths, titles);
+            if let Some(ref from_track) = from {
+                // Try to find track by ID or title
+                let start_idx = if let Ok(id) = from_track.parse::<i64>() {
+                    // Find by ID
+                    let query = if playlist.is_some() {
+                        "SELECT t.title FROM tracks t
+                         JOIN playlist_tracks pt ON pt.track_id = t.id
+                         JOIN playlists p ON p.id = pt.playlist_id
+                         WHERE p.name = ?1 AND t.id = ?2"
+                    } else {
+                        "SELECT title FROM tracks WHERE id = ?1"
+                    };
+                    let title: Option<String> = if let Some(ref pl) = playlist {
+                        conn.query_row(query, params![pl, id], |row| row.get(0)).ok()
+                    } else {
+                        conn.query_row(query, params![id], |row| row.get(0)).ok()
+                    };
+                    title.and_then(|t| titles.iter().position(|x| x == &t))
+                } else {
+                    // Find by title (partial match)
+                    titles.iter().position(|t| t.to_lowercase().contains(&from_track.to_lowercase()))
+                };
+
+                if let Some(idx) = start_idx {
+                    // Rotate vectors so selected track is first
+                    paths.rotate_left(idx);
+                    titles.rotate_left(idx);
+                }
             }
 
             let (paths, titles) = if shuffle {
