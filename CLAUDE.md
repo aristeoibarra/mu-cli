@@ -63,7 +63,8 @@ mu play focus                           # play playlist
 mu play focus --shuffle                 # shuffle order
 mu pause
 mu resume
-mu skip
+mu next                                 # skip to next track
+mu previous                             # go to previous track (or restart current if at index 0)
 mu stop                                 # stop and kill daemon
 
 # Query (JSON output)

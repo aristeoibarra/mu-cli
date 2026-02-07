@@ -35,8 +35,10 @@ enum Commands {
     Pause,
     /// Resume playback
     Resume,
-    /// Skip current track
-    Skip,
+    /// Skip to next track
+    Next,
+    /// Go to previous track
+    Previous,
     /// Stop playback and kill daemon
     Stop,
     /// Show current status
@@ -249,7 +251,15 @@ fn main() {
             }
         },
 
-        Commands::Skip => match client::send_command("skip") {
+        Commands::Next => match client::send_command("next") {
+            Ok(r) => println!("{r}"),
+            Err(e) => {
+                println!("{}", json_error(&e));
+                std::process::exit(1);
+            }
+        },
+
+        Commands::Previous => match client::send_command("previous") {
             Ok(r) => println!("{r}"),
             Err(e) => {
                 println!("{}", json_error(&e));

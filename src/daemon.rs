@@ -30,7 +30,8 @@ enum PlayerMsg {
     Play(Vec<PathBuf>, Vec<String>),
     Pause,
     Resume,
-    Skip,
+    Next,
+    Previous,
     Stop,
     Status(std::sync::mpsc::Sender<Status>),
 }
@@ -93,7 +94,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     PlayerMsg::Pause => sink.pause(),
                     PlayerMsg::Resume => sink.play(),
-                    PlayerMsg::Skip => {
+                    PlayerMsg::Next => {
                         sink.stop();
                         let next = current_index + 1;
                         if let Some(path) = tracks.get(next) {
@@ -101,6 +102,20 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                             active = play_track(&sink, path);
                         } else {
                             active = false;
+                        }
+                    }
+                    PlayerMsg::Previous => {
+                        sink.stop();
+                        if current_index > 0 {
+                            current_index -= 1;
+                            if let Some(path) = tracks.get(current_index) {
+                                active = play_track(&sink, path);
+                            }
+                        } else {
+                            // Si ya estamos en el primero, reinicia el track actual
+                            if let Some(path) = tracks.get(current_index) {
+                                active = play_track(&sink, path);
+                            }
                         }
                     }
                     PlayerMsg::Stop => {
@@ -171,9 +186,13 @@ fn handle_command(line: &str, tx: &mpsc::Sender<PlayerMsg>) -> String {
             let _ = tx.send(PlayerMsg::Resume);
             r#"{"ok":true,"action":"resumed"}"#.to_string()
         }
-        "skip" => {
-            let _ = tx.send(PlayerMsg::Skip);
-            r#"{"ok":true,"action":"skipped"}"#.to_string()
+        "next" => {
+            let _ = tx.send(PlayerMsg::Next);
+            r#"{"ok":true,"action":"next"}"#.to_string()
+        }
+        "previous" => {
+            let _ = tx.send(PlayerMsg::Previous);
+            r#"{"ok":true,"action":"previous"}"#.to_string()
         }
         "stop" => {
             let _ = tx.send(PlayerMsg::Stop);
