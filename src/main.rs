@@ -258,21 +258,25 @@ fn main() {
         },
 
         Commands::Stop => {
-            match client::send_command("stop") {
-                Ok(r) => println!("{r}"),
-                Err(_) => {}
-            }
             let pid_path = data_dir.join("mu.pid");
+            let mut killed = false;
+
             if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
-                if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                    std::process::Command::new("kill")
-                        .arg(pid.to_string())
-                        .output()
-                        .ok();
+                if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                    unsafe {
+                        if libc::kill(pid, libc::SIGTERM) == 0 {
+                            killed = true;
+                        }
+                    }
                 }
             }
+
+            if killed {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+
             let _ = std::fs::remove_file(data_dir.join("mu.sock"));
-            let _ = std::fs::remove_file(data_dir.join("mu.pid"));
+            let _ = std::fs::remove_file(pid_path);
             println!(r#"{{"ok":true,"action":"stopped"}}"#);
         }
 

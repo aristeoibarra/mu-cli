@@ -11,3 +11,4 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 tokio = { version = "1", features = ["full"] }
 rodio = "0.19"
 dirs = "6"
+libc = "0.2"
