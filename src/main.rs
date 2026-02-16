@@ -1,7 +1,10 @@
 mod client;
+mod commands;
 mod daemon;
 mod db;
 mod downloader;
+mod notifications;
+mod podcast;
 
 use clap::{Parser, Subcommand};
 use rusqlite::params;
@@ -27,6 +30,9 @@ enum Commands {
     Play {
         /// Playlist name (plays all tracks if omitted)
         playlist: Option<String>,
+        /// Podcast name to play episodes from
+        #[arg(long)]
+        podcast: Option<String>,
         /// Shuffle tracks
         #[arg(short, long)]
         shuffle: bool,
@@ -61,6 +67,16 @@ enum Commands {
         /// Track ID or title substring
         track: String,
     },
+    /// Manage podcasts
+    Podcast {
+        #[command(subcommand)]
+        action: PodcastCommand,
+    },
+    /// Set playback speed
+    Speed {
+        /// Speed multiplier (0.5 - 3.0)
+        speed: f32,
+    },
     /// Run as daemon (internal)
     Daemon,
 }
@@ -87,6 +103,79 @@ enum PlaylistAction {
     },
     /// List all playlists
     List,
+}
+
+#[derive(Subcommand)]
+enum PodcastCommand {
+    /// Subscribe to a podcast feed
+    Subscribe {
+        /// RSS feed URL
+        feed_url: String,
+        /// Maximum episodes to keep locally
+        #[arg(long, default_value = "5")]
+        max: i64,
+        /// Don't auto-download episodes
+        #[arg(long)]
+        no_auto: bool,
+    },
+    /// List subscribed podcasts
+    List,
+    /// List episodes of a podcast
+    Episodes {
+        /// Podcast name or ID
+        podcast: String,
+        /// Show only unplayed episodes
+        #[arg(long)]
+        unplayed_only: bool,
+    },
+    /// Update podcast feeds (check for new episodes)
+    Update {
+        /// Specific podcast to update (all if omitted)
+        podcast: Option<String>,
+    },
+    /// Configure podcast settings
+    Config {
+        /// Podcast name
+        podcast: String,
+        /// Enable/disable auto-download
+        #[arg(long)]
+        auto_download: Option<bool>,
+        /// Enable/disable notifications
+        #[arg(long)]
+        notify: Option<bool>,
+        /// Set max episodes to keep
+        #[arg(long)]
+        max: Option<i64>,
+    },
+    /// Unsubscribe from a podcast
+    Unsubscribe {
+        /// Podcast name
+        podcast: String,
+        /// Also delete downloaded files
+        #[arg(long)]
+        delete_files: bool,
+    },
+    /// Cleanup old completed episodes
+    Cleanup {
+        /// Show what would be deleted without deleting
+        #[arg(long)]
+        dry_run: bool,
+        /// Force cleanup even if not Sunday
+        #[arg(long)]
+        force: bool,
+    },
+    /// Show podcast storage usage and limits
+    Storage,
+    /// Set max podcast storage limit
+    SetMaxStorage {
+        /// Maximum storage in GB
+        size_gb: f64,
+    },
+    /// Show listening statistics
+    Stats {
+        /// Specific podcast (all podcasts if omitted)
+        podcast: Option<String>,
+    },
 }
 
 fn json_error(msg: &str) -> String {
@@ -135,10 +224,39 @@ fn main() {
             }
         }
 
-        Commands::Play { playlist, shuffle, from } => {
+        Commands::Play { playlist, podcast, shuffle, from } => {
             let conn = db::open(&db_path).expect("db open failed");
 
-            let (paths, titles): (Vec<String>, Vec<String>) = if let Some(ref pl_name) = playlist {
+            // Track episode IDs for podcast playback
+            let mut episode_ids: Vec<i64> = Vec::new();
+
+            let (paths, titles): (Vec<String>, Vec<String>) = if let Some(ref podcast_name) = podcast {
+                // Play podcast episodes (most recent first, unplayed only)
+                let podcast_id = db::find_podcast_id(&conn, podcast_name)
+                    .unwrap_or_else(|_| {
+                        println!("{}", json_error(&format!("Podcast '{}' not found", podcast_name)));
+                        std::process::exit(1);
+                    });
+                
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT id, file_path, title FROM episodes
+                         WHERE podcast_id = ?1 AND is_downloaded = 1 AND playback_status = 'new'
+                         ORDER BY pub_date DESC"
+                    )
+                    .expect("query failed");
+                let rows: Vec<(i64, String, String)> = stmt
+                    .query_map([podcast_id], |row| {
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+                    })
+                    .expect("query failed")
+                    .filter_map(|r| r.ok())
+                    .collect();
+                
+                // Extract episode_ids and (paths, titles)
+                episode_ids = rows.iter().map(|(id, _, _)| *id).collect();
+                rows.into_iter().map(|(_, path, title)| (path, title)).unzip()
+            } else if let Some(ref pl_name) = playlist {
                 let mut stmt = conn
                     .prepare(
                         "SELECT t.file_path, t.title FROM tracks t
@@ -203,7 +321,7 @@ fn main() {
                 }
             }
 
-            let (paths, titles) = if shuffle {
+            let (paths, titles, episode_ids) = if shuffle {
                 use std::collections::hash_map::DefaultHasher;
                 use std::hash::{Hash, Hasher};
                 let mut indices: Vec<usize> = (0..paths.len()).collect();
@@ -222,9 +340,10 @@ fn main() {
                 }
                 let paths: Vec<String> = indices.iter().map(|&i| paths[i].clone()).collect();
                 let titles: Vec<String> = indices.iter().map(|&i| titles[i].clone()).collect();
-                (paths, titles)
+                let episode_ids: Vec<i64> = indices.iter().map(|&i| episode_ids.get(i).copied().unwrap_or(0)).collect();
+                (paths, titles, episode_ids)
             } else {
-                (paths, titles)
+                (paths, titles, episode_ids)
             };
 
             // Start daemon if not running
@@ -251,6 +370,7 @@ fn main() {
                 "cmd": "play",
                 "tracks": paths,
                 "titles": titles,
+                "episode_ids": episode_ids,
             });
             match std::os::unix::net::UnixStream::connect(&sock_path) {
                 Ok(mut stream) => {
@@ -559,6 +679,85 @@ fn main() {
                 }
                 None => {
                     println!("{}", json_error("track not found"));
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Commands::Podcast { action } => {
+            let rt = tokio::runtime::Runtime::new().expect("tokio runtime failed");
+            rt.block_on(async {
+                let result = match action {
+                    PodcastCommand::Subscribe { feed_url, max, no_auto } => {
+                        commands::podcast_commands::subscribe(feed_url, Some(max), !no_auto).await
+                    }
+                    PodcastCommand::List => {
+                        commands::podcast_commands::list()
+                    }
+                    PodcastCommand::Episodes { podcast, unplayed_only } => {
+                        commands::podcast_commands::list_episodes(podcast, unplayed_only)
+                    }
+                    PodcastCommand::Update { podcast } => {
+                        commands::podcast_commands::update(podcast).await
+                    }
+                    PodcastCommand::Config { podcast, auto_download, notify, max } => {
+                        commands::podcast_commands::config(podcast, auto_download, notify, max)
+                    }
+                    PodcastCommand::Unsubscribe { podcast, delete_files } => {
+                        commands::podcast_commands::unsubscribe(podcast, delete_files).await
+                    }
+                    PodcastCommand::Cleanup { dry_run, force } => {
+                        commands::podcast_commands::cleanup(dry_run, force).await
+                    }
+                    PodcastCommand::Storage => {
+                        let conn = db::open(&db_path).expect("db open failed");
+                        let current = db::calculate_podcast_storage(&conn).unwrap_or(0);
+                        let max = db::get_max_storage(&conn).unwrap_or(5368709120);
+                        let current_gb = current as f64 / 1024.0 / 1024.0 / 1024.0;
+                        let max_gb = max as f64 / 1024.0 / 1024.0 / 1024.0;
+                        let percent = if max > 0 { current as f64 / max as f64 * 100.0 } else { 0.0 };
+                        
+                        Ok(serde_json::json!({
+                            "current_gb": format!("{:.2}", current_gb),
+                            "max_gb": format!("{:.2}", max_gb),
+                            "used_percent": format!("{:.1}", percent),
+                            "current_bytes": current,
+                            "max_bytes": max,
+                        }).to_string())
+                    }
+                    PodcastCommand::SetMaxStorage { size_gb } => {
+                        let conn = db::open(&db_path).expect("db open failed");
+                        let bytes = (size_gb * 1024.0 * 1024.0 * 1024.0) as i64;
+                        match db::set_max_storage(&conn, bytes) {
+                            Ok(_) => Ok(serde_json::json!({
+                                "ok": true,
+                                "max_storage_gb": size_gb,
+                                "max_storage_bytes": bytes,
+                            }).to_string()),
+                            Err(e) => Err(e.to_string()),
+                        }
+                    }
+                    PodcastCommand::Stats { podcast } => {
+                        commands::podcast_commands::stats(podcast)
+                    }
+                };
+                
+                match result {
+                    Ok(output) => println!("{}", output),
+                    Err(e) => {
+                        println!("{}", json_error(&e));
+                        std::process::exit(1);
+                    }
+                }
+            });
+        }
+
+        Commands::Speed { speed } => {
+            let speed = speed.clamp(0.5, 3.0);
+            match client::send_command(&format!(r#"{{"cmd":"set_speed","speed":{}}}"#, speed)) {
+                Ok(r) => println!("{r}"),
+                Err(e) => {
+                    println!("{}", json_error(&e));
                     std::process::exit(1);
                 }
             }
