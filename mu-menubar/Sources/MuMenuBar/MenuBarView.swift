@@ -10,46 +10,100 @@ struct PlaybackStatus: Codable {
 
 struct MenuBarView: View {
     @StateObject var player = PlayerController()
+    @State private var isDragging = false
+    @State private var dragProgress: Double = 0.0
     
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 16) {
             // Track info
             VStack(spacing: 4) {
                 if let track = player.status?.track {
                     Text(track)
-                        .font(.headline)
+                        .font(.system(size: 13, weight: .semibold))
                         .lineLimit(2)
                         .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
                     
                     if let status = player.status {
                         Text("Track \(status.track_index + 1) of \(status.total_tracks)")
-                            .font(.caption)
+                            .font(.system(size: 11))
                             .foregroundColor(.secondary)
                     }
                 } else {
-                    Text("No track playing")
-                        .font(.headline)
+                    Text("Not playing")
+                        .font(.system(size: 13))
                         .foregroundColor(.secondary)
                 }
             }
             .frame(maxWidth: .infinity)
-            .padding(.horizontal)
+            .padding(.horizontal, 20)
+            .padding(.top, 8)
             
-            Divider()
-            
-            // Progress bar placeholder (will implement later with episode progress)
+            // Progress bar with time labels (Spotify style)
             if player.status?.track != nil {
-                ProgressView(value: player.progress)
-                    .progressViewStyle(.linear)
-                    .padding(.horizontal)
+                VStack(spacing: 4) {
+                    // Draggable progress bar
+                    GeometryReader { geometry in
+                        ZStack(alignment: .leading) {
+                            // Background track
+                            Rectangle()
+                                .fill(Color.gray.opacity(0.3))
+                                .frame(height: 4)
+                                .cornerRadius(2)
+                            
+                            // Progress track
+                            Rectangle()
+                                .fill(Color.accentColor)
+                                .frame(width: geometry.size.width * (isDragging ? dragProgress : player.progress), height: 4)
+                                .cornerRadius(2)
+                        }
+                        .frame(height: 4)
+                        .gesture(
+                            DragGesture(minimumDistance: 0)
+                                .onChanged { value in
+                                    isDragging = true
+                                    dragProgress = min(max(0, value.location.x / geometry.size.width), 1.0)
+                                }
+                                .onEnded { value in
+                                    let finalProgress = min(max(0, value.location.x / geometry.size.width), 1.0)
+                                    player.seek(to: finalProgress)
+                                    isDragging = false
+                                }
+                        )
+                        .onHover { hovering in
+                            if hovering {
+                                NSCursor.pointingHand.push()
+                            } else {
+                                NSCursor.pop()
+                            }
+                        }
+                    }
+                    .frame(height: 4)
+                    .padding(.horizontal, 20)
+                    
+                    // Time labels
+                    HStack {
+                        Text(formatTime(player.currentTime))
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary)
+                        
+                        Spacer()
+                        
+                        Text(formatTime(player.duration))
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.horizontal, 20)
+                }
             }
             
             // Playback controls
-            HStack(spacing: 20) {
-                // Previous (seek backward)
+            HStack(spacing: 24) {
+                // Seek backward
                 Button(action: { player.seekBackward() }) {
                     Image(systemName: "gobackward.15")
-                        .font(.system(size: 18))
+                        .font(.system(size: 20))
+                        .foregroundColor(.primary)
                 }
                 .buttonStyle(.plain)
                 .help("Seek backward 15s")
@@ -57,15 +111,23 @@ struct MenuBarView: View {
                 // Previous track
                 Button(action: { player.previous() }) {
                     Image(systemName: "backward.fill")
-                        .font(.system(size: 16))
+                        .font(.system(size: 18))
+                        .foregroundColor(.primary)
                 }
                 .buttonStyle(.plain)
                 .help("Previous track")
                 
-                // Play/Pause
+                // Play/Pause (larger, centered)
                 Button(action: { player.togglePlayPause() }) {
-                    Image(systemName: playPauseIcon)
-                        .font(.system(size: 24))
+                    ZStack {
+                        Circle()
+                            .fill(Color.accentColor)
+                            .frame(width: 44, height: 44)
+                        
+                        Image(systemName: playPauseIcon)
+                            .font(.system(size: 18))
+                            .foregroundColor(.white)
+                    }
                 }
                 .buttonStyle(.plain)
                 .help(playPauseHelp)
@@ -73,27 +135,27 @@ struct MenuBarView: View {
                 // Next track
                 Button(action: { player.next() }) {
                     Image(systemName: "forward.fill")
-                        .font(.system(size: 16))
+                        .font(.system(size: 18))
+                        .foregroundColor(.primary)
                 }
                 .buttonStyle(.plain)
                 .help("Next track")
                 
-                // Next (seek forward)
+                // Seek forward
                 Button(action: { player.seekForward() }) {
                     Image(systemName: "goforward.15")
-                        .font(.system(size: 18))
+                        .font(.system(size: 20))
+                        .foregroundColor(.primary)
                 }
                 .buttonStyle(.plain)
                 .help("Seek forward 15s")
             }
-            .padding(.vertical, 8)
+            .padding(.vertical, 12)
             
-            Divider()
-            
-            // Speed control
-            HStack {
-                Text("Speed:")
-                    .font(.caption)
+            // Speed control (compact)
+            HStack(spacing: 8) {
+                Image(systemName: "gauge.medium")
+                    .font(.system(size: 12))
                     .foregroundColor(.secondary)
                 
                 Picker("", selection: $player.speed) {
@@ -108,29 +170,19 @@ struct MenuBarView: View {
                     Text("3.0x").tag(3.0)
                 }
                 .pickerStyle(.menu)
-                .frame(width: 80)
+                .frame(width: 75)
             }
-            .padding(.horizontal)
-            
-            Divider()
-            
-            // Quick actions
-            VStack(spacing: 8) {
-                Button("Open Raycast...") {
-                    NSWorkspace.shared.open(URL(string: "raycast://extensions/aristeoibarra/mu/podcasts")!)
-                }
-                .buttonStyle(.plain)
-                
-                Button("Quit") {
-                    NSApplication.shared.terminate(nil)
-                }
-                .buttonStyle(.plain)
-            }
-            .font(.caption)
-            .padding(.bottom, 8)
+            .padding(.horizontal, 20)
+            .padding(.bottom, 12)
         }
-        .frame(width: 300)
-        .padding()
+        .frame(width: 320)
+        .background(Color(NSColor.windowBackgroundColor))
+    }
+    
+    private func formatTime(_ seconds: Double) -> String {
+        let mins = Int(seconds) / 60
+        let secs = Int(seconds) % 60
+        return String(format: "%d:%02d", mins, secs)
     }
     
     private var playPauseIcon: String {
@@ -156,6 +208,8 @@ class PlayerController: ObservableObject {
         }
     }
     @Published var progress: Double = 0.0
+    @Published var currentTime: Double = 0.0
+    @Published var duration: Double = 100.0
     
     private var timer: Timer?
     private var wasPlaying = false
@@ -185,6 +239,15 @@ class PlayerController: ObservableObject {
             DispatchQueue.main.async { [weak self] in
                 self?.appDelegate?.showPopover()
             }
+        }
+        
+        // Update progress (for now, simulate based on track index)
+        if let newStatus = newStatus, newStatus.total_tracks > 0 {
+            let trackProgress = Double(newStatus.track_index) / Double(newStatus.total_tracks)
+            progress = trackProgress
+            
+            // Simulate current time and duration (will be real from backend later)
+            currentTime = trackProgress * duration
         }
         
         wasPlaying = newStatus?.playing ?? false
@@ -242,6 +305,13 @@ class PlayerController: ObservableObject {
         } catch {
             print("Failed to seek backward: \(error)")
         }
+    }
+    
+    func seek(to progress: Double) {
+        // Calculate seconds based on progress and duration
+        let seconds = Int(progress * duration)
+        // TODO: Implement absolute seek in backend
+        print("Seek to \(seconds)s (progress: \(progress))")
     }
     
     private func setSpeed(_ speed: Double) {
