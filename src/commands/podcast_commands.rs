@@ -13,8 +13,18 @@ pub async fn subscribe(
     // Fetch and parse feed
     let (feed, mut episodes) = podcast::fetch_and_parse(&feed_url).await?;
     
+    // Download artwork if available
+    let artwork_path = if let Some(ref artwork_url) = feed.artwork_url {
+        match podcast::download_artwork(artwork_url, &feed.title).await {
+            Ok(path) => Some(path.to_string_lossy().to_string()),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+    
     // Insert podcast
-    let podcast_id = podcast::upsert_podcast(&conn, &feed, &feed_url, max_episodes.unwrap_or(5))?;
+    let podcast_id = podcast::upsert_podcast(&conn, &feed, &feed_url, max_episodes.unwrap_or(5), artwork_path.as_deref())?;
     
     // Sort episodes by date (oldest first for initial subscription)
     episodes.sort_by(|a, b| a.pub_date.cmp(&b.pub_date));
@@ -72,6 +82,7 @@ pub fn list() -> Result<String, String> {
                 p.title,
                 p.author,
                 p.feed_url,
+                p.artwork_path,
                 p.last_checked,
                 p.auto_download,
                 p.notify_new_episodes,
@@ -92,12 +103,13 @@ pub fn list() -> Result<String, String> {
                 "title": row.get::<_, String>(1)?,
                 "author": row.get::<_, Option<String>>(2)?,
                 "feed_url": row.get::<_, String>(3)?,
-                "last_checked": row.get::<_, Option<String>>(4)?,
-                "auto_download": row.get::<_, bool>(5)?,
-                "notify": row.get::<_, bool>(6)?,
-                "max_episodes": row.get::<_, i64>(7)?,
-                "unplayed": row.get::<_, i64>(8)?,
-                "total_episodes": row.get::<_, i64>(9)?,
+                "artwork_path": row.get::<_, Option<String>>(4)?,
+                "last_checked": row.get::<_, Option<String>>(5)?,
+                "auto_download": row.get::<_, bool>(6)?,
+                "notify": row.get::<_, bool>(7)?,
+                "max_episodes": row.get::<_, i64>(8)?,
+                "unplayed": row.get::<_, i64>(9)?,
+                "total_episodes": row.get::<_, i64>(10)?,
             }))
         })
         .map_err(|e| format!("Query error: {}", e))?
@@ -116,12 +128,12 @@ pub fn list_episodes(podcast_name: String, unplayed_only: bool) -> Result<String
         .map_err(|_| format!("Podcast '{}' not found", podcast_name))?;
     
     let query = if unplayed_only {
-        "SELECT id, title, pub_date, duration_secs, playback_status, is_downloaded, file_size_bytes
+        "SELECT id, title, pub_date, duration_secs, playback_status, playback_progress, is_downloaded, file_size_bytes
          FROM episodes
          WHERE podcast_id = ?1 AND playback_status = 'new' AND is_downloaded = 1
          ORDER BY pub_date DESC"
     } else {
-        "SELECT id, title, pub_date, duration_secs, playback_status, is_downloaded, file_size_bytes
+        "SELECT id, title, pub_date, duration_secs, playback_status, playback_progress, is_downloaded, file_size_bytes
          FROM episodes
          WHERE podcast_id = ?1
          ORDER BY pub_date DESC"
@@ -139,8 +151,9 @@ pub fn list_episodes(podcast_name: String, unplayed_only: bool) -> Result<String
                 "pub_date": row.get::<_, String>(2)?,
                 "duration_secs": row.get::<_, Option<i64>>(3)?,
                 "status": row.get::<_, String>(4)?,
-                "downloaded": row.get::<_, bool>(5)?,
-                "size_mb": row.get::<_, i64>(6)? as f64 / 1024.0 / 1024.0,
+                "playback_progress": row.get::<_, f64>(5)?,
+                "downloaded": row.get::<_, bool>(6)?,
+                "size_mb": row.get::<_, i64>(7)? as f64 / 1024.0 / 1024.0,
             }))
         })
         .map_err(|e| format!("Query error: {}", e))?
@@ -184,7 +197,16 @@ pub async fn update(podcast_name: Option<String>) -> Result<String, String> {
     
     for (podcast_id, title, feed_url, auto_download) in podcasts {
         match podcast::fetch_and_parse(&feed_url).await {
-            Ok((_feed, episodes)) => {
+            Ok((feed, episodes)) => {
+                // Update artwork if it changed
+                if let Some(ref artwork_url) = feed.artwork_url {
+                    if let Ok(path) = podcast::download_artwork(artwork_url, &title).await {
+                        conn.execute(
+                            "UPDATE podcasts SET artwork_path = ?1, artwork_url = ?2 WHERE id = ?3",
+                            params![path.to_string_lossy().to_string(), artwork_url, podcast_id],
+                        ).ok();
+                    }
+                }
                 let mut new_count = 0;
                 let mut downloaded_count = 0;
                 

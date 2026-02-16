@@ -54,6 +54,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             feed_url TEXT UNIQUE NOT NULL,
             description TEXT,
             artwork_url TEXT,
+            artwork_path TEXT,
             last_checked DATETIME,
             auto_download BOOLEAN DEFAULT 1,
             notify_new_episodes BOOLEAN DEFAULT 1,
@@ -98,6 +99,7 @@ pub fn data_dir() -> std::path::PathBuf {
     std::fs::create_dir_all(&dir).ok();
     std::fs::create_dir_all(dir.join("tracks")).ok();
     std::fs::create_dir_all(dir.join("podcasts")).ok();
+    std::fs::create_dir_all(dir.join("artwork")).ok();
     dir
 }
 

@@ -294,21 +294,95 @@ async fn download_direct(
     Ok((filepath, file_size))
 }
 
+/// Download podcast artwork and save locally
+pub async fn download_artwork(
+    artwork_url: &str,
+    podcast_title: &str,
+) -> Result<PathBuf, String> {
+    let artwork_dir = db::data_dir().join("artwork");
+    
+    tokio::fs::create_dir_all(&artwork_dir)
+        .await
+        .map_err(|e| format!("Failed to create artwork directory: {}", e))?;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .user_agent("mu-podcast-player/0.1")
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+
+    let response = client
+        .get(artwork_url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to download artwork: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("HTTP error: {}", response.status()));
+    }
+
+    // Determine file extension from content-type or URL
+    let ext = response
+        .headers()
+        .get("content-type")
+        .and_then(|ct| ct.to_str().ok())
+        .and_then(|ct| {
+            if ct.contains("jpeg") || ct.contains("jpg") {
+                Some("jpg")
+            } else if ct.contains("png") {
+                Some("png")
+            } else if ct.contains("webp") {
+                Some("webp")
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            if artwork_url.ends_with(".jpg") || artwork_url.ends_with(".jpeg") {
+                Some("jpg")
+            } else if artwork_url.ends_with(".png") {
+                Some("png")
+            } else if artwork_url.ends_with(".webp") {
+                Some("webp")
+            } else {
+                Some("jpg") // default
+            }
+        })
+        .unwrap();
+
+    let safe_title = sanitize_filename(podcast_title);
+    let filename = format!("{}.{}", safe_title, ext);
+    let filepath = artwork_dir.join(&filename);
+
+    let content = response
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read artwork: {}", e))?;
+
+    tokio::fs::write(&filepath, &content)
+        .await
+        .map_err(|e| format!("Failed to write artwork: {}", e))?;
+
+    Ok(filepath)
+}
+
 /// Insert or update podcast in database
 pub fn upsert_podcast(
     conn: &Connection,
     feed: &PodcastFeed,
     feed_url: &str,
     max_episodes: i64,
+    artwork_path: Option<&str>,
 ) -> Result<i64, String> {
     conn.execute(
-        "INSERT INTO podcasts (title, author, feed_url, description, artwork_url, max_episodes, last_checked)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, CURRENT_TIMESTAMP)
+        "INSERT INTO podcasts (title, author, feed_url, description, artwork_url, artwork_path, max_episodes, last_checked)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, CURRENT_TIMESTAMP)
          ON CONFLICT(feed_url) DO UPDATE SET
             title = ?1,
             author = ?2,
             description = ?4,
             artwork_url = ?5,
+            artwork_path = ?6,
             last_checked = CURRENT_TIMESTAMP",
         params![
             feed.title,
@@ -316,6 +390,7 @@ pub fn upsert_podcast(
             feed_url,
             feed.description,
             feed.artwork_url,
+            artwork_path,
             max_episodes,
         ],
     )
