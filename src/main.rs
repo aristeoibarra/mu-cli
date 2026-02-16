@@ -1,8 +1,7 @@
-mod client;
 mod commands;
-mod daemon;
 mod db;
 mod downloader;
+mod music;
 mod notifications;
 mod podcast;
 
@@ -10,7 +9,7 @@ use clap::{Parser, Subcommand};
 use rusqlite::params;
 
 #[derive(Parser)]
-#[command(name = "mu", about = "Local music player CLI")]
+#[command(name = "mu", about = "Local music player CLI - Downloads and imports to Apple Music")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -18,7 +17,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Download a track
+    /// Download a track and import to Apple Music
     Add {
         /// Song name or URL
         query: String,
@@ -26,19 +25,13 @@ enum Commands {
         #[arg(short, long)]
         playlist: Option<String>,
     },
-    /// Start playing tracks in background
+    /// Play tracks in Apple Music
     Play {
-        /// Playlist name (plays all tracks if omitted)
+        /// Playlist name (plays all library if omitted)
         playlist: Option<String>,
-        /// Podcast name to play episodes from
-        #[arg(long)]
-        podcast: Option<String>,
-        /// Shuffle tracks
+        /// Track name to play
         #[arg(short, long)]
-        shuffle: bool,
-        /// Start from specific track (ID or title)
-        #[arg(long)]
-        from: Option<String>,
+        track: Option<String>,
     },
     /// Pause playback
     Pause,
@@ -48,11 +41,11 @@ enum Commands {
     Next,
     /// Go to previous track
     Previous,
-    /// Stop playback and kill daemon
+    /// Stop playback
     Stop,
     /// Show current status
     Status,
-    /// List tracks or playlists
+    /// List tracks in local database
     List {
         /// Playlist name to list tracks from
         playlist: Option<String>,
@@ -62,7 +55,7 @@ enum Commands {
         #[command(subcommand)]
         action: PlaylistAction,
     },
-    /// Remove a track from library and disk
+    /// Remove a track from library
     Remove {
         /// Track ID or title substring
         track: String,
@@ -72,18 +65,6 @@ enum Commands {
         #[command(subcommand)]
         action: PodcastCommand,
     },
-    /// Set playback speed
-    Speed {
-        /// Speed multiplier (0.5 - 3.0)
-        speed: f32,
-    },
-    /// Seek forward or backward
-    Seek {
-        /// Seconds to seek (positive = forward, negative = backward)
-        seconds: i32,
-    },
-    /// Run as daemon (internal)
-    Daemon,
 }
 
 #[derive(Subcommand)]
@@ -99,13 +80,6 @@ enum PlaylistAction {
     },
     /// Remove a playlist
     Remove { name: String },
-    /// Remove a track from a playlist
-    RemoveTrack {
-        /// Playlist name
-        playlist: String,
-        /// Track ID or title substring
-        track: String,
-    },
     /// List all playlists
     List,
 }
@@ -181,10 +155,19 @@ enum PodcastCommand {
         /// Specific podcast (all podcasts if omitted)
         podcast: Option<String>,
     },
+    /// Import all episodes to Apple Music library
+    Import {
+        /// Podcast name
+        podcast: String,
+    },
 }
 
 fn json_error(msg: &str) -> String {
     serde_json::json!({"error": msg}).to_string()
+}
+
+fn json_ok(msg: &str) -> String {
+    serde_json::json!({"ok": true, "message": msg}).to_string()
 }
 
 fn main() {
@@ -197,7 +180,14 @@ fn main() {
             let conn = db::open(&db_path).expect("db open failed");
             match downloader::download(&query, &conn) {
                 Ok(result) => {
+                    // Import to Apple Music library
+                    let file_path = std::path::Path::new(&result.file);
+                    if let Err(e) = music::import_to_library(file_path) {
+                        eprintln!("Warning: Failed to import to Apple Music: {}", e);
+                    }
+                    
                     if let Some(pl_name) = playlist {
+                        // Add to local playlist in DB
                         let pl_id: Option<i64> = conn
                             .query_row(
                                 "SELECT id FROM playlists WHERE name = ?1",
@@ -219,6 +209,9 @@ fn main() {
                             )
                             .ok();
                         }
+                        
+                        // Also create/update playlist in Apple Music
+                        let _ = music::add_to_playlist(file_path, &pl_name);
                     }
                     println!("{}", serde_json::to_string(&result).unwrap());
                 }
@@ -229,234 +222,88 @@ fn main() {
             }
         }
 
-        Commands::Play { playlist, podcast, shuffle, from } => {
-            let conn = db::open(&db_path).expect("db open failed");
-
-            // Track episode IDs for podcast playback
-            let mut episode_ids: Vec<i64> = Vec::new();
-
-            let (paths, titles): (Vec<String>, Vec<String>) = if let Some(ref podcast_name) = podcast {
-                // Play podcast episodes (most recent first, unplayed only)
-                let podcast_id = db::find_podcast_id(&conn, podcast_name)
-                    .unwrap_or_else(|_| {
-                        println!("{}", json_error(&format!("Podcast '{}' not found", podcast_name)));
-                        std::process::exit(1);
-                    });
-                
-                let mut stmt = conn
-                    .prepare(
-                        "SELECT id, file_path, title FROM episodes
-                         WHERE podcast_id = ?1 AND is_downloaded = 1 AND playback_status = 'new'
-                         ORDER BY pub_date DESC"
-                    )
-                    .expect("query failed");
-                let rows: Vec<(i64, String, String)> = stmt
-                    .query_map([podcast_id], |row| {
-                        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
-                    })
-                    .expect("query failed")
-                    .filter_map(|r| r.ok())
-                    .collect();
-                
-                // Extract episode_ids and (paths, titles)
-                episode_ids = rows.iter().map(|(id, _, _)| *id).collect();
-                rows.into_iter().map(|(_, path, title)| (path, title)).unzip()
-            } else if let Some(ref pl_name) = playlist {
-                let mut stmt = conn
-                    .prepare(
-                        "SELECT t.file_path, t.title FROM tracks t
-                         JOIN playlist_tracks pt ON pt.track_id = t.id
-                         JOIN playlists p ON p.id = pt.playlist_id
-                         WHERE p.name = ?1
-                         ORDER BY pt.position",
-                    )
-                    .expect("query failed");
-                let rows = stmt
-                    .query_map(params![pl_name], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                    })
-                    .expect("query failed");
-                rows.filter_map(|r| r.ok()).unzip()
+        Commands::Play { playlist, track } => {
+            let result = if let Some(track_name) = track {
+                music::play_track(&track_name)
             } else {
-                let mut stmt = conn
-                    .prepare("SELECT file_path, title FROM tracks ORDER BY id")
-                    .expect("query failed");
-                let rows = stmt
-                    .query_map([], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                    })
-                    .expect("query failed");
-                rows.filter_map(|r| r.ok()).unzip()
+                music::play_playlist(playlist.as_deref())
             };
-
-            if paths.is_empty() {
-                println!("{}", json_error("no tracks found"));
-                std::process::exit(1);
-            }
-
-            // Handle --from parameter to start from specific track
-            let (mut paths, mut titles) = (paths, titles);
-            if let Some(ref from_track) = from {
-                // Try to find track by ID or title
-                let start_idx = if let Ok(id) = from_track.parse::<i64>() {
-                    // Find by ID
-                    let query = if playlist.is_some() {
-                        "SELECT t.title FROM tracks t
-                         JOIN playlist_tracks pt ON pt.track_id = t.id
-                         JOIN playlists p ON p.id = pt.playlist_id
-                         WHERE p.name = ?1 AND t.id = ?2"
-                    } else {
-                        "SELECT title FROM tracks WHERE id = ?1"
-                    };
-                    let title: Option<String> = if let Some(ref pl) = playlist {
-                        conn.query_row(query, params![pl, id], |row| row.get(0)).ok()
-                    } else {
-                        conn.query_row(query, params![id], |row| row.get(0)).ok()
-                    };
-                    title.and_then(|t| titles.iter().position(|x| x == &t))
-                } else {
-                    // Find by title (partial match)
-                    titles.iter().position(|t| t.to_lowercase().contains(&from_track.to_lowercase()))
-                };
-
-                if let Some(idx) = start_idx {
-                    // Rotate vectors so selected track is first
-                    paths.rotate_left(idx);
-                    titles.rotate_left(idx);
-                }
-            }
-
-            let (paths, titles, episode_ids) = if shuffle {
-                use std::collections::hash_map::DefaultHasher;
-                use std::hash::{Hash, Hasher};
-                let mut indices: Vec<usize> = (0..paths.len()).collect();
-                let mut hasher = DefaultHasher::new();
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-                    .hash(&mut hasher);
-                let seed = hasher.finish();
-                let mut rng = seed;
-                for i in (1..indices.len()).rev() {
-                    rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
-                    let j = (rng as usize) % (i + 1);
-                    indices.swap(i, j);
-                }
-                let paths: Vec<String> = indices.iter().map(|&i| paths[i].clone()).collect();
-                let titles: Vec<String> = indices.iter().map(|&i| titles[i].clone()).collect();
-                let episode_ids: Vec<i64> = indices.iter().map(|&i| episode_ids.get(i).copied().unwrap_or(0)).collect();
-                (paths, titles, episode_ids)
-            } else {
-                (paths, titles, episode_ids)
-            };
-
-            // Start daemon if not running
-            if !client::daemon_running() {
-                let exe = std::env::current_exe().expect("cannot find self");
-                std::process::Command::new(exe)
-                    .arg("daemon")
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn()
-                    .expect("failed to start daemon");
-                for _ in 0..20 {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                    if client::daemon_running() {
-                        break;
-                    }
-                }
-            }
-
-            // Send play command with tracks
-            let sock_path = data_dir.join("mu.sock");
-            let msg = serde_json::json!({
-                "cmd": "play",
-                "tracks": paths,
-                "titles": titles,
-                "episode_ids": episode_ids,
-            });
-            match std::os::unix::net::UnixStream::connect(&sock_path) {
-                Ok(mut stream) => {
-                    use std::io::Write;
-                    let _ = write!(stream, "{}\n", msg);
-                    stream.flush().ok();
-                    let mut reader = std::io::BufReader::new(stream);
-                    let mut response = String::new();
-                    use std::io::BufRead;
-                    let _ = reader.read_line(&mut response);
-                    println!("{}", response.trim());
-                }
-                Err(_) => {
-                    println!("{}", json_error("could not connect to daemon"));
+            
+            match result {
+                Ok(_) => println!("{}", json_ok("Playing in Apple Music")),
+                Err(e) => {
+                    println!("{}", json_error(&e));
                     std::process::exit(1);
                 }
             }
         }
 
-        Commands::Pause => match client::send_command("pause") {
-            Ok(r) => println!("{r}"),
-            Err(e) => {
-                println!("{}", json_error(&e));
-                std::process::exit(1);
-            }
-        },
-
-        Commands::Resume => match client::send_command("resume") {
-            Ok(r) => println!("{r}"),
-            Err(e) => {
-                println!("{}", json_error(&e));
-                std::process::exit(1);
-            }
-        },
-
-        Commands::Next => match client::send_command("next") {
-            Ok(r) => println!("{r}"),
-            Err(e) => {
-                println!("{}", json_error(&e));
-                std::process::exit(1);
-            }
-        },
-
-        Commands::Previous => match client::send_command("previous") {
-            Ok(r) => println!("{r}"),
-            Err(e) => {
-                println!("{}", json_error(&e));
-                std::process::exit(1);
-            }
-        },
-
-        Commands::Stop => {
-            let pid_path = data_dir.join("mu.pid");
-            let mut killed = false;
-
-            if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
-                if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                    unsafe {
-                        if libc::kill(pid, libc::SIGTERM) == 0 {
-                            killed = true;
-                        }
-                    }
+        Commands::Pause => {
+            match music::pause() {
+                Ok(_) => println!("{}", json_ok("Paused")),
+                Err(e) => {
+                    println!("{}", json_error(&e));
+                    std::process::exit(1);
                 }
             }
-
-            if killed {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-
-            let _ = std::fs::remove_file(data_dir.join("mu.sock"));
-            let _ = std::fs::remove_file(pid_path);
-            println!(r#"{{"ok":true,"action":"stopped"}}"#);
         }
 
-        Commands::Status => match client::send_command("status") {
-            Ok(r) => println!("{r}"),
-            Err(e) => {
-                println!("{}", json_error(&e));
-                std::process::exit(1);
+        Commands::Resume => {
+            match music::resume() {
+                Ok(_) => println!("{}", json_ok("Resumed")),
+                Err(e) => {
+                    println!("{}", json_error(&e));
+                    std::process::exit(1);
+                }
             }
-        },
+        }
+
+        Commands::Next => {
+            match music::next_track() {
+                Ok(_) => println!("{}", json_ok("Next track")),
+                Err(e) => {
+                    println!("{}", json_error(&e));
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Commands::Previous => {
+            match music::previous_track() {
+                Ok(_) => println!("{}", json_ok("Previous track")),
+                Err(e) => {
+                    println!("{}", json_error(&e));
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Commands::Stop => {
+            match music::stop() {
+                Ok(_) => println!("{}", json_ok("Stopped")),
+                Err(e) => {
+                    println!("{}", json_error(&e));
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Commands::Status => {
+            match music::get_status() {
+                Ok(status) => {
+                    println!("{}", serde_json::json!({
+                        "track": status.track,
+                        "state": status.state,
+                        "position_secs": status.position_secs,
+                        "duration_secs": status.duration_secs,
+                    }));
+                }
+                Err(e) => {
+                    println!("{}", json_error(&e));
+                    std::process::exit(1);
+                }
+            }
+        }
 
         Commands::List { playlist } => {
             let conn = db::open(&db_path).expect("db open failed");
@@ -510,11 +357,13 @@ fn main() {
             let conn = db::open(&db_path).expect("db open failed");
             match action {
                 PlaylistAction::Create { name } => {
+                    // Create in local DB
                     match conn.execute("INSERT INTO playlists (name) VALUES (?1)", params![name]) {
-                        Ok(_) => println!(
-                            "{}",
-                            serde_json::json!({"ok": true, "playlist": name})
-                        ),
+                        Ok(_) => {
+                            // Also create in Apple Music
+                            let _ = music::create_playlist(&name);
+                            println!("{}", serde_json::json!({"ok": true, "playlist": name}));
+                        }
                         Err(e) => {
                             println!("{}", json_error(&format!("create failed: {e}")));
                             std::process::exit(1);
@@ -534,28 +383,30 @@ fn main() {
                             std::process::exit(1);
                         }
                     };
-                    let track_id: Option<i64> = track
+                    
+                    // Find track
+                    let track_row: Option<(i64, String)> = track
                         .parse::<i64>()
                         .ok()
                         .and_then(|id| {
                             conn.query_row(
-                                "SELECT id FROM tracks WHERE id = ?1",
+                                "SELECT id, file_path FROM tracks WHERE id = ?1",
                                 params![id],
-                                |row| row.get(0),
+                                |row| Ok((row.get(0)?, row.get(1)?)),
                             )
                             .ok()
                         })
                         .or_else(|| {
                             conn.query_row(
-                                "SELECT id FROM tracks WHERE title LIKE '%' || ?1 || '%' LIMIT 1",
+                                "SELECT id, file_path FROM tracks WHERE title LIKE '%' || ?1 || '%' LIMIT 1",
                                 params![track],
-                                |row| row.get(0),
+                                |row| Ok((row.get(0)?, row.get(1)?)),
                             )
                             .ok()
                         });
 
-                    match track_id {
-                        Some(tid) => {
+                    match track_row {
+                        Some((tid, file_path)) => {
                             let pos: i64 = conn
                                 .query_row(
                                     "SELECT COALESCE(MAX(position), 0) + 1 FROM playlist_tracks WHERE playlist_id = ?1",
@@ -568,6 +419,10 @@ fn main() {
                                 params![pl_id, tid, pos],
                             )
                             .ok();
+                            
+                            // Also add to Apple Music playlist
+                            let _ = music::add_to_playlist(std::path::Path::new(&file_path), &playlist);
+                            
                             println!(
                                 "{}",
                                 serde_json::json!({"ok": true, "track_id": tid, "playlist": playlist})
@@ -583,50 +438,6 @@ fn main() {
                     conn.execute("DELETE FROM playlists WHERE name = ?1", params![name])
                         .ok();
                     println!("{}", serde_json::json!({"ok": true, "removed": name}));
-                }
-                PlaylistAction::RemoveTrack { playlist, track } => {
-                    let pl_id: Result<i64, _> = conn.query_row(
-                        "SELECT id FROM playlists WHERE name = ?1",
-                        params![playlist],
-                        |row| row.get(0),
-                    );
-                    let pl_id = match pl_id {
-                        Ok(id) => id,
-                        Err(_) => {
-                            println!("{}", json_error("playlist not found"));
-                            std::process::exit(1);
-                        }
-                    };
-                    let track_id: Option<i64> = track
-                        .parse::<i64>()
-                        .ok()
-                        .or_else(|| {
-                            conn.query_row(
-                                "SELECT t.id FROM tracks t
-                                 JOIN playlist_tracks pt ON pt.track_id = t.id
-                                 WHERE pt.playlist_id = ?1 AND t.title LIKE '%' || ?2 || '%' LIMIT 1",
-                                params![pl_id, track],
-                                |row| row.get(0),
-                            )
-                            .ok()
-                        });
-                    match track_id {
-                        Some(tid) => {
-                            conn.execute(
-                                "DELETE FROM playlist_tracks WHERE playlist_id = ?1 AND track_id = ?2",
-                                params![pl_id, tid],
-                            )
-                            .ok();
-                            println!(
-                                "{}",
-                                serde_json::json!({"ok": true, "removed_track": tid, "playlist": playlist})
-                            );
-                        }
-                        None => {
-                            println!("{}", json_error("track not found in playlist"));
-                            std::process::exit(1);
-                        }
-                    }
                 }
                 PlaylistAction::List => {
                     let mut stmt = conn
@@ -745,6 +556,48 @@ fn main() {
                     PodcastCommand::Stats { podcast } => {
                         commands::podcast_commands::stats(podcast)
                     }
+                    PodcastCommand::Import { podcast } => {
+                        // Import all downloaded episodes to Apple Music
+                        let conn = db::open(&db_path).expect("db open failed");
+                        let podcast_id = match db::find_podcast_id(&conn, &podcast) {
+                            Ok(id) => id,
+                            Err(_) => return,
+                        };
+                        
+                        let mut stmt = match conn.prepare("SELECT file_path, title FROM episodes WHERE podcast_id = ?1 AND is_downloaded = 1") {
+                            Ok(s) => s,
+                            Err(e) => {
+                                println!("{}", json_error(&e.to_string()));
+                                return;
+                            }
+                        };
+                        
+                        let episodes: Vec<(String, String)> = stmt
+                            .query_map([podcast_id], |row| Ok((row.get(0)?, row.get(1)?)))
+                            .unwrap_or_else(|_| panic!("query failed"))
+                            .filter_map(|r| r.ok())
+                            .collect();
+                        
+                        let mut imported = 0;
+                        let mut failed = 0;
+                        
+                        for (file_path, _title) in &episodes {
+                            let path = std::path::Path::new(file_path);
+                            if music::import_to_library(path).is_ok() {
+                                imported += 1;
+                            } else {
+                                failed += 1;
+                            }
+                        }
+                        
+                        Ok(serde_json::json!({
+                            "ok": true,
+                            "podcast": podcast,
+                            "imported": imported,
+                            "failed": failed,
+                            "total": episodes.len(),
+                        }).to_string())
+                    }
                 };
                 
                 match result {
@@ -753,37 +606,6 @@ fn main() {
                         println!("{}", json_error(&e));
                         std::process::exit(1);
                     }
-                }
-            });
-        }
-
-        Commands::Speed { speed } => {
-            let speed = speed.clamp(0.5, 3.0);
-            match client::send_command(&format!(r#"{{"cmd":"set_speed","speed":{}}}"#, speed)) {
-                Ok(r) => println!("{r}"),
-                Err(e) => {
-                    println!("{}", json_error(&e));
-                    std::process::exit(1);
-                }
-            }
-        }
-
-        Commands::Seek { seconds } => {
-            match client::send_command(&format!(r#"{{"cmd":"seek","seconds":{}}}"#, seconds)) {
-                Ok(r) => println!("{r}"),
-                Err(e) => {
-                    println!("{}", json_error(&e));
-                    std::process::exit(1);
-                }
-            }
-        }
-
-        Commands::Daemon => {
-            let rt = tokio::runtime::Runtime::new().expect("tokio runtime failed");
-            rt.block_on(async {
-                if let Err(e) = daemon::run().await {
-                    eprintln!("daemon error: {e}");
-                    std::process::exit(1);
                 }
             });
         }

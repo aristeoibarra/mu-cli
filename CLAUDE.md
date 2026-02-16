@@ -4,33 +4,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`mu` is a minimal local music player and podcast manager CLI for macOS. Downloads audio via yt-dlp, stores metadata in SQLite, plays via background daemon using CoreAudio. Supports podcast subscriptions with auto-download and notifications. All output is JSON — designed to be controlled by Claude Code via Bash.
+`mu` is a minimal local music player and podcast manager CLI for macOS. Downloads audio via yt-dlp, stores metadata in SQLite, **delegates playback to Apple Music** via osascript. Supports podcast subscriptions with auto-download and notifications. All output is JSON — designed to be controlled by Claude Code via Bash.
 
 ## Architecture
 
 ```
-mu <command>  (CLI, exits immediately)
-    ↓ Unix domain socket (~/.../mu/mu.sock)
-mu daemon     (background process, auto-spawned by `mu play`)
-    ↓ mpsc channel
-audio thread  (rodio → CoreAudio)
+mu add "song"              → yt-dlp → MP3 → imports to Apple Music
+mu podcast subscribe "url" → RSS → download → stored locally
+mu podcast import "name"   → imports episodes to Apple Music
+mu play                    → osascript → Apple Music plays
 ```
 
 ### Modules
 
 - **main.rs** — CLI routing (clap). All command logic lives here.
-- **daemon.rs** — tokio async socket server + dedicated audio thread + podcast update loop (every hour). Audio thread required because rodio's `OutputStream`/`Sink` are not `Send`.
-- **client.rs** — sends JSON commands to daemon via Unix socket, reads response.
+- **music.rs** — Apple Music integration via osascript (import, play, pause, status, playlists).
 - **db.rs** — SQLite with WAL mode, foreign keys, auto-migration on open.
-- **downloader.rs** — wraps `yt-dlp` as subprocess. Downloads MP3 only (rodio v0.19 lacks opus support).
+- **downloader.rs** — wraps `yt-dlp` as subprocess. Downloads MP3 only.
 - **podcast.rs** — RSS feed parser (rss crate), async episode downloader (yt-dlp + direct HTTP), DB helpers.
 - **commands/podcast_commands.rs** — podcast CLI command implementations.
 - **notifications.rs** — desktop notifications via notify-rust.
 
 ### Key Constraints
 
-- **MP3 only** — rodio v0.19 doesn't support opus. Format hardcoded in `downloader.rs`.
-- **Daemon lifecycle** — auto-starts on `mu play`, killed by `mu stop`. PID in `mu.pid`, socket in `mu.sock`.
+- **MP3 only** — Format hardcoded in `downloader.rs`.
+- **Apple Music for playback** — All audio plays through Apple Music app. No custom audio daemon.
 - **All output is JSON** — success and errors. Exit code 0 = ok, 1 = error. This enables Claude Code to parse responses via Bash.
 
 ## Build
@@ -46,8 +44,6 @@ Location: `~/Library/Application Support/mu/`
 
 ```
 mu.db          SQLite (tracks, playlists, episodes, podcasts, config)
-mu.sock        Unix socket (CLI ↔ daemon IPC)
-mu.pid         daemon PID
 tracks/        downloaded mp3 files
 podcasts/      podcast episodes organized by podcast name
 ```
@@ -62,23 +58,18 @@ Foreign keys cascade on delete.
 ## CLI Reference
 
 ```bash
-# Download
-mu add "song name or URL"              # search YouTube, download mp3
+# Download & Import
+mu add "song name or URL"              # search YouTube, download mp3, import to Apple Music
 mu add "song" --playlist focus          # download and add to playlist
 
-# Playback (daemon auto-starts)
-mu play                                 # play all tracks
-mu play focus                           # play playlist
-mu play focus --shuffle                 # shuffle order
-mu play --podcast "DevTalles"           # play podcast episodes (newest first, unplayed only)
-mu play --from <track_id|title>         # start from specific track
-mu play focus --from "song name"        # start playlist from specific track
+# Playback (via Apple Music)
+mu play                                 # play in Apple Music
+mu play focus                           # play playlist in Apple Music
 mu pause
 mu resume
 mu next                                 # skip to next track
-mu previous                             # go to previous track (or restart current if at index 0)
-mu speed 1.5                            # set playback speed (0.5x - 3.0x)
-mu stop                                 # stop and kill daemon
+mu previous                             # go to previous track
+mu stop                                 # stop playback
 
 # Query (JSON output)
 mu status                               # current track, playing/paused state
@@ -100,6 +91,7 @@ mu podcast subscribe "https://feed.url" [--max 10] [--no-auto]
 mu podcast list                         # list all subscriptions
 mu podcast episodes "DevTalles" [--unplayed-only]
 mu podcast update [--podcast "name"]    # check for new episodes
+mu podcast import "DevTalles"           # import episodes to Apple Music
 mu podcast config "DevTalles" --notify true --auto-download true --max 10
 mu podcast unsubscribe "DevTalles" [--delete-files]
 mu podcast cleanup [--dry-run] [--force]
@@ -115,10 +107,19 @@ Track lookup accepts ID (integer) or title substring match.
 
 **New CLI command:** add variant to `Commands` enum + match arm in `main()` (both in `main.rs`).
 
-**New daemon command:** 3 places — `DaemonCmd` struct (add `#[serde(default)]` fields), `handle_command()` match arm, `PlayerMsg` enum if it touches audio state. All in `daemon.rs`.
+**New Apple Music command:** add function to `music.rs` using osascript.
 
-**New audio format:** upgrade rodio or add symphonia features in `Cargo.toml`, change format string in `downloader.rs`.
+## External Dependencies
 
-## External Dependency
+- `yt-dlp` must be in PATH (`brew install yt-dlp`). Plain text queries become `ytsearch1:<query>`, URLs pass through directly.
+- **Apple Music** must be installed (comes with macOS).
 
-`yt-dlp` must be in PATH (`brew install yt-dlp`). Plain text queries become `ytsearch1:<query>`, URLs pass through directly.
+## Raycast Extension
+
+Located in `mu-raycast/`. Provides UI for:
+- Browsing music library
+- Browsing podcasts and episodes
+- Subscribing to new podcasts
+- Viewing podcast stats
+
+Playback is handled by Apple Music directly.
