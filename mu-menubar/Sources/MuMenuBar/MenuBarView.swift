@@ -9,7 +9,7 @@ struct PlaybackStatus: Codable {
 }
 
 struct MenuBarView: View {
-    @StateObject private var player = PlayerController()
+    @StateObject var player = PlayerController()
     
     var body: some View {
         VStack(spacing: 12) {
@@ -158,6 +158,8 @@ class PlayerController: ObservableObject {
     @Published var progress: Double = 0.0
     
     private var timer: Timer?
+    private var wasPlaying = false
+    weak var appDelegate: AppDelegate?
     
     init() {
         startPolling()
@@ -176,7 +178,17 @@ class PlayerController: ObservableObject {
     }
     
     private func updateStatus() {
-        status = runCommand("status")
+        let newStatus: PlaybackStatus? = runCommand("status")
+        
+        // Auto-show popover when playback starts
+        if let newStatus = newStatus, newStatus.playing && !wasPlaying {
+            DispatchQueue.main.async { [weak self] in
+                self?.appDelegate?.showPopover()
+            }
+        }
+        
+        wasPlaying = newStatus?.playing ?? false
+        status = newStatus
     }
     
     func togglePlayPause() {
@@ -209,13 +221,27 @@ class PlayerController: ObservableObject {
     }
     
     func seekForward() {
-        // TODO: Implement seek forward 15s in backend
-        print("Seek forward 15s - not implemented yet")
+        let task = Process()
+        task.launchPath = "/opt/homebrew/bin/mu"
+        task.arguments = ["seek", "15"]
+        
+        do {
+            try task.run()
+        } catch {
+            print("Failed to seek forward: \(error)")
+        }
     }
     
     func seekBackward() {
-        // TODO: Implement seek backward 15s in backend
-        print("Seek backward 15s - not implemented yet")
+        let task = Process()
+        task.launchPath = "/opt/homebrew/bin/mu"
+        task.arguments = ["seek", "-15"]
+        
+        do {
+            try task.run()
+        } catch {
+            print("Failed to seek backward: \(error)")
+        }
     }
     
     private func setSpeed(_ speed: Double) {

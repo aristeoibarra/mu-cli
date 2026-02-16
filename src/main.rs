@@ -77,6 +77,11 @@ enum Commands {
         /// Speed multiplier (0.5 - 3.0)
         speed: f32,
     },
+    /// Seek forward or backward
+    Seek {
+        /// Seconds to seek (positive = forward, negative = backward)
+        seconds: i32,
+    },
     /// Run as daemon (internal)
     Daemon,
 }
@@ -755,6 +760,16 @@ fn main() {
         Commands::Speed { speed } => {
             let speed = speed.clamp(0.5, 3.0);
             match client::send_command(&format!(r#"{{"cmd":"set_speed","speed":{}}}"#, speed)) {
+                Ok(r) => println!("{r}"),
+                Err(e) => {
+                    println!("{}", json_error(&e));
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Commands::Seek { seconds } => {
+            match client::send_command(&format!(r#"{{"cmd":"seek","seconds":{}}}"#, seconds)) {
                 Ok(r) => println!("{r}"),
                 Err(e) => {
                     println!("{}", json_error(&e));

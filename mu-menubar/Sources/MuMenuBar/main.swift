@@ -14,6 +14,7 @@ struct MuMenuBarApp: App {
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem?
     var popover = NSPopover()
+    var playerController: PlayerController?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Hide dock icon
@@ -29,7 +30,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         
         // Setup popover
-        popover.contentViewController = NSHostingController(rootView: MenuBarView())
+        let menuBarView = MenuBarView()
+        playerController = menuBarView.player
+        playerController?.appDelegate = self
+        popover.contentViewController = NSHostingController(rootView: menuBarView)
         popover.behavior = .transient
     }
     
@@ -37,9 +41,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if popover.isShown {
             popover.performClose(nil)
         } else {
-            if let button = statusItem?.button {
-                popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            }
+            showPopover()
+        }
+    }
+    
+    func showPopover() {
+        if let button = statusItem?.button {
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         }
     }
 }

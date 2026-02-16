@@ -19,6 +19,8 @@ struct DaemonCmd {
     episode_ids: Vec<i64>,
     #[serde(default)]
     speed: Option<f32>,
+    #[serde(default)]
+    seconds: Option<i32>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -38,6 +40,7 @@ enum PlayerMsg {
     Previous,
     Stop,
     SetSpeed(f32),
+    Seek(i32),  // seconds (positive = forward, negative = backward)
     Status(std::sync::mpsc::Sender<Status>),
 }
 
@@ -185,6 +188,10 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     PlayerMsg::SetSpeed(speed) => {
                         sink.set_speed(speed);
+                    }
+                    PlayerMsg::Seek(_seconds) => {
+                        // TODO: Rodio doesn't support seeking directly
+                        // Would need to track position manually and restart from offset
                     }
                     PlayerMsg::Status(reply) => {
                         let _ = reply.send(Status {
@@ -436,6 +443,11 @@ fn handle_command(line: &str, tx: &mpsc::Sender<PlayerMsg>) -> String {
             let speed = cmd.speed.unwrap_or(1.0).clamp(0.5, 3.0);
             let _ = tx.send(PlayerMsg::SetSpeed(speed));
             format!(r#"{{"ok":true,"speed":{}}}"#, speed)
+        }
+        "seek" => {
+            let seconds = cmd.seconds.unwrap_or(0);
+            let _ = tx.send(PlayerMsg::Seek(seconds));
+            format!(r#"{{"ok":true,"message":"Seek not fully implemented yet","seconds":{}}}"#, seconds)
         }
         _ => format!(r#"{{"error":"unknown command: {}"}}"#, cmd.cmd),
     }
