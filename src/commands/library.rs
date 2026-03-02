@@ -70,8 +70,15 @@ pub fn handle_list(db_path: &Path, playlist: Option<&str>) -> Result<()> {
 
 pub fn handle_remove(db_path: &Path, track: &str) -> Result<()> {
     let conn = db::open(db_path)?;
-    let (tid, file_path, artwork_path) =
+    let (tid, file_path, artwork_path, apple_music_id) =
         db::resolve_track_for_remove(&conn, track).ok_or(MuError::TrackNotFound)?;
+
+    // Remove from Apple Music (by persistent ID, fallback to file path)
+    if let Some(ref pid) = apple_music_id {
+        let _ = music::delete_track(pid);
+    } else {
+        let _ = music::delete_track_by_path(&file_path);
+    }
 
     conn.execute(
         "DELETE FROM playlist_tracks WHERE track_id = ?1",
@@ -107,7 +114,7 @@ pub fn handle_migrate(db_path: &Path, dry_run: bool) -> Result<()> {
         return Ok(());
     }
 
-    let (imported, skipped, failed) = import_tracks(&tracks);
+    let (imported, skipped, failed) = import_tracks(&conn, &tracks);
     println!(
         "{}",
         serde_json::json!({
@@ -154,7 +161,7 @@ pub fn handle_reimport(db_path: &Path, track: Option<&str>) -> Result<()> {
     let mut reimported = 0;
     let mut failed = 0;
 
-    for (_id, title, artist, album, file_path) in &tracks {
+    for (id, title, artist, album, file_path) in &tracks {
         let path = Path::new(file_path);
 
         if !path.exists() {
@@ -165,7 +172,14 @@ pub fn handle_reimport(db_path: &Path, track: Option<&str>) -> Result<()> {
 
         match music::import_with_metadata(path, artist.as_deref(), album.as_deref(), Some("Music"))
         {
-            Ok(_) => {
+            Ok(import) => {
+                if let Some(ref pid) = import.persistent_id {
+                    conn.execute(
+                        "UPDATE tracks SET apple_music_id = ?1 WHERE id = ?2",
+                        params![pid, id],
+                    )
+                    .ok();
+                }
                 reimported += 1;
                 eprintln!("Reimported: {title} by {artist:?}");
             }
@@ -183,12 +197,12 @@ pub fn handle_reimport(db_path: &Path, track: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn import_tracks(tracks: &[db::TrackRow]) -> (i64, i64, i64) {
+fn import_tracks(conn: &rusqlite::Connection, tracks: &[db::TrackRow]) -> (i64, i64, i64) {
     let mut imported = 0;
     let mut skipped = 0;
     let mut failed = 0;
 
-    for (_id, title, artist, album, file_path) in tracks {
+    for (id, title, artist, album, file_path) in tracks {
         let path = Path::new(file_path);
 
         if !path.exists() {
@@ -204,7 +218,14 @@ fn import_tracks(tracks: &[db::TrackRow]) -> (i64, i64, i64) {
 
         match music::import_with_metadata(path, artist.as_deref(), album.as_deref(), Some("Music"))
         {
-            Ok(_) => {
+            Ok(import) => {
+                if let Some(ref pid) = import.persistent_id {
+                    conn.execute(
+                        "UPDATE tracks SET apple_music_id = ?1 WHERE id = ?2",
+                        params![pid, id],
+                    )
+                    .ok();
+                }
                 imported += 1;
                 eprintln!("Imported: {title}");
             }

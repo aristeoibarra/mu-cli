@@ -9,30 +9,43 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Architecture
 
 ```
-mu add "song"    → yt-dlp → MP3 (with artwork) → imports to Apple Music
+mu add "song"    → yt-dlp → M4A/AAC 256kbps → iTunes artwork (fallback: YouTube thumbnail) → imports to Apple Music
 mu play          → osascript → Apple Music plays
 mu playlist sync → syncs local playlists to Apple Music
 ```
 
 ### Modules
 
-- **main.rs** — CLI routing (clap). All command logic lives here.
-- **music.rs** — Apple Music integration via osascript (import, play, pause, status, playlists).
-- **db.rs** — SQLite with WAL mode, foreign keys, auto-migration on open.
-- **downloader.rs** — wraps `yt-dlp` as subprocess. Downloads MP3 with embedded thumbnails. Parses artist/album from video metadata.
+- **main.rs** — CLI definition (clap `Commands` enum) + dispatch to command handlers.
+- **commands/** — Command handlers, split by domain:
+  - `add.rs` — download + import + optional playlist add.
+  - `playback.rs` — play, pause, resume, next, previous, stop.
+  - `library.rs` — list, remove, status, info, migrate, reimport.
+  - `playlist.rs` — CRUD + sync. Defines `PlaylistAction` subcommand enum.
+- **music.rs** — Apple Music integration via osascript (import, play, pause, status, playlists, delete tracks, sync).
+- **db.rs** — SQLite with WAL mode, foreign keys, auto-migration on open. Track/playlist resolution helpers. Stores Apple Music persistent IDs for reliable sync.
+- **downloader.rs** — wraps `yt-dlp` as subprocess. Downloads M4A/AAC with embedded thumbnails. Fetches high-quality artwork from iTunes Search API (falls back to YouTube thumbnail). Parses artist/album from video metadata. Updates metadata + embeds artwork via `ffmpeg`.
+- **error.rs** — `MuError` enum (thiserror), `Result<T>` alias, `json_error()`/`json_ok()` helpers.
 
 ### Key Constraints
 
-- **MP3 only** — Format hardcoded in `downloader.rs`.
+- **M4A/AAC only** — Format hardcoded in `downloader.rs` (256 kbps, iTunes Store quality).
 - **Apple Music for playback** — All audio plays through Apple Music app. No custom audio daemon.
 - **All output is JSON** — success and errors. Exit code 0 = ok, 1 = error. This enables Claude Code to parse responses via Bash.
-- **Artwork embedded** — yt-dlp embeds thumbnails in MP3 files via `--embed-thumbnail`.
+- **Artwork embedded** — iTunes Search API provides high-quality album art (1200x1200). Falls back to YouTube thumbnails via `--embed-thumbnail`.
 
-## Build
+## Build & Test
 
 ```bash
 cargo build --release
 cp target/release/mu /opt/homebrew/bin/mu
+
+# Tests (unit tests in downloader.rs for metadata parsing)
+cargo test
+cargo test parse_artist       # run single test by name
+
+# Linting (strict config in Cargo.toml: clippy::all = deny, pedantic = warn)
+cargo clippy
 ```
 
 ## Data
@@ -41,22 +54,22 @@ Location: `~/Library/Application Support/mu/`
 
 ```
 mu.db          SQLite (tracks, playlists)
-tracks/        downloaded mp3 files
+tracks/        downloaded m4a files
 artwork/       thumbnail images (jpg)
 ```
 
 Schema:
-- **tracks(id, title, artist, album, duration_secs, file_path, artwork_path, source_url, added_at)**
+- **tracks(id, title, artist, album, duration_secs, file_path, artwork_path, source_url, added_at, apple_music_id)**
 - **playlists(id, name)**
 - **playlist_tracks(playlist_id, track_id, position)**
 
-Foreign keys cascade on delete.
+Foreign keys cascade on delete. `apple_music_id` stores the Apple Music persistent ID for reliable sync (populated on add/reimport/migrate).
 
 ## CLI Reference
 
 ```bash
 # Download & Import
-mu add "song name or URL"              # search YouTube, download mp3 with artwork, import to Apple Music
+mu add "song name or URL"              # search YouTube, download m4a with artwork, import to Apple Music
 mu add "song" --playlist focus         # download and add to playlist
 
 # Playback (via Apple Music)
@@ -93,9 +106,21 @@ mu reimport [track]                    # re-import track(s) with updated metadat
 
 Track lookup accepts ID (integer) or title substring match.
 
+## Apple Music Sync
+
+SQLite is the source of truth. Apple Music is kept in sync via persistent IDs:
+
+- **`mu add`** — imports to Apple Music, stores persistent ID in DB
+- **`mu remove`** — deletes from Apple Music (by persistent ID, fallback to file path), then from DB + disk
+- **`mu playlist add`** — adds to Apple Music playlist (by persistent ID, fallback to name)
+- **`mu playlist remove-track`** — removes from Apple Music playlist, then from DB
+- **`mu playlist remove`** — deletes playlist from Apple Music + DB
+- **`mu playlist sync`** — bidirectional: adds missing tracks, removes extras from Apple Music playlists
+- **`mu reimport`** / **`mu migrate`** — backfills persistent IDs for existing tracks
+
 ## Adding Features
 
-**New CLI command:** add variant to `Commands` enum + match arm in `main()` (both in `main.rs`).
+**New CLI command:** add variant to `Commands` enum in `main.rs`, create handler in the appropriate `commands/*.rs` file, re-export from `commands/mod.rs`, add match arm in `main()`.
 
 **New Apple Music command:** add function to `music.rs` using osascript.
 
@@ -103,7 +128,9 @@ Track lookup accepts ID (integer) or title substring match.
 
 - `yt-dlp` must be in PATH (`brew install yt-dlp`). Plain text queries become `ytsearch1:<query>`, URLs pass through directly. Uses `--embed-thumbnail` for artwork.
 - **Apple Music** must be installed (comes with macOS).
-- `curl` for downloading artwork separately.
+- `curl` for downloading artwork (iTunes Search API + YouTube thumbnails).
+- `ffmpeg` for updating metadata and embedding artwork in M4A files (optional — fails silently if missing).
+- **iTunes Search API** (free, no auth) for high-quality album artwork (1200x1200). Falls back to YouTube thumbnails if no match found.
 
 ## Metadata Parsing
 

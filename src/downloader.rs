@@ -108,6 +108,7 @@ fn run_yt_dlp(args: &[&str]) -> Result<std::process::Output> {
         })
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn download(query: &str, conn: &Connection) -> Result<AddResult> {
     let data_dir = db::data_dir();
     let tracks_dir = data_dir.join("tracks");
@@ -182,9 +183,9 @@ pub fn download(query: &str, conn: &Connection) -> Result<AddResult> {
     let dl = run_yt_dlp(&[
         "-x",
         "--audio-format",
-        "mp3",
+        "m4a",
         "--audio-quality",
-        "192K",
+        "256K",
         "--embed-thumbnail",
         "--add-metadata",
         "--print",
@@ -203,11 +204,22 @@ pub fn download(query: &str, conn: &Connection) -> Result<AddResult> {
 
     let file_path = String::from_utf8_lossy(&dl.stdout).trim().to_string();
 
-    // Download artwork separately for display purposes
-    let artwork_path = download_artwork(&video_id, &thumbnail_url, &artwork_dir);
+    // Fix permissions so Apple Music can read the file
+    set_readable_permissions(&file_path);
 
-    // Update ID3 tags with our parsed metadata
-    update_id3_tags(&file_path, &title, artist.as_deref(), album.as_deref());
+    // Try iTunes artwork first, fall back to YouTube thumbnail
+    let artwork_path =
+        fetch_itunes_artwork(artist.as_deref(), &title, &artwork_dir, &video_id)
+            .or_else(|| download_artwork(&video_id, &thumbnail_url, &artwork_dir));
+
+    // Update metadata and embed artwork if available
+    update_metadata(
+        &file_path,
+        &title,
+        artist.as_deref(),
+        album.as_deref(),
+        artwork_path.as_deref(),
+    );
 
     // Insert into database
     conn.execute(
@@ -229,7 +241,70 @@ pub fn download(query: &str, conn: &Connection) -> Result<AddResult> {
     })
 }
 
-/// Download artwork/thumbnail to artwork directory
+/// Set file permissions to 644 so Apple Music can read imported files
+fn set_readable_permissions(path: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644));
+}
+
+/// Fetch high-quality artwork from iTunes Search API
+fn fetch_itunes_artwork(
+    artist: Option<&str>,
+    title: &str,
+    artwork_dir: &Path,
+    video_id: &str,
+) -> Option<String> {
+    let search_term = match artist {
+        Some(a) => format!("{a} {title}"),
+        None => title.to_string(),
+    };
+
+    let url = format!(
+        "https://itunes.apple.com/search?term={}&media=music&limit=1",
+        urlencod(&search_term)
+    );
+
+    let result = Command::new("curl")
+        .args(["-sL", &url])
+        .output()
+        .ok()?;
+
+    if !result.status.success() {
+        return None;
+    }
+
+    let json: serde_json::Value = serde_json::from_slice(&result.stdout).ok()?;
+    let artwork_url_100 = json
+        .get("results")?
+        .as_array()?
+        .first()?
+        .get("artworkUrl100")?
+        .as_str()?;
+
+    let artwork_url = artwork_url_100.replace("100x100bb", "1200x1200bb");
+    let artwork_path = artwork_dir.join(format!("{video_id}.jpg"));
+
+    let dl = Command::new("curl")
+        .args(["-sL", "-o", artwork_path.to_str()?, &artwork_url])
+        .output()
+        .ok()?;
+
+    if dl.status.success() && artwork_path.exists() {
+        Some(artwork_path.to_string_lossy().to_string())
+    } else {
+        None
+    }
+}
+
+/// Minimal URL encoding for iTunes search queries
+fn urlencod(s: &str) -> String {
+    s.replace(' ', "+")
+        .replace('&', "%26")
+        .replace('?', "%3F")
+        .replace('#', "%23")
+}
+
+/// Download artwork/thumbnail to artwork directory (`YouTube` fallback)
 fn download_artwork(video_id: &str, thumbnail_url: &str, artwork_dir: &Path) -> Option<String> {
     if thumbnail_url.is_empty() || thumbnail_url == "NA" {
         return None;
@@ -249,28 +324,42 @@ fn download_artwork(video_id: &str, thumbnail_url: &str, artwork_dir: &Path) -> 
     }
 }
 
-/// Update ID3 tags in MP3 file using ffmpeg
-fn update_id3_tags(file_path: &str, title: &str, artist: Option<&str>, album: Option<&str>) {
-    let tmp_path = format!("{file_path}.tmp.mp3");
+/// Update metadata (and optionally embed artwork) in audio file using ffmpeg
+fn update_metadata(
+    file_path: &str,
+    title: &str,
+    artist: Option<&str>,
+    album: Option<&str>,
+    artwork_path: Option<&str>,
+) {
+    let tmp_path = format!("{file_path}.tmp.m4a");
 
-    let mut args = vec![
-        "-y".to_string(),
-        "-i".to_string(),
-        file_path.to_string(),
-        "-c".to_string(),
-        "copy".to_string(),
-        "-metadata".to_string(),
-        format!("title={title}"),
-    ];
+    let mut args = vec!["-y".to_string(), "-i".to_string(), file_path.to_string()];
+
+    if let Some(art) = artwork_path {
+        args.extend(["-i".to_string(), art.to_string()]);
+        args.extend([
+            "-map".to_string(),
+            "0:a".to_string(),
+            "-map".to_string(),
+            "1".to_string(),
+            "-c".to_string(),
+            "copy".to_string(),
+            "-disposition:v:0".to_string(),
+            "attached_pic".to_string(),
+        ]);
+    } else {
+        args.extend(["-c".to_string(), "copy".to_string()]);
+    }
+
+    args.extend(["-metadata".to_string(), format!("title={title}")]);
 
     if let Some(a) = artist {
-        args.push("-metadata".to_string());
-        args.push(format!("artist={a}"));
+        args.extend(["-metadata".to_string(), format!("artist={a}")]);
     }
 
     if let Some(a) = album {
-        args.push("-metadata".to_string());
-        args.push(format!("album={a}"));
+        args.extend(["-metadata".to_string(), format!("album={a}")]);
     }
 
     args.push(tmp_path.clone());

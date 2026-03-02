@@ -230,6 +230,95 @@ pub fn add_track_to_playlist(track_name: &str, playlist: &str) -> Result<()> {
     run_osascript(&script)
 }
 
+/// Delete a track from Apple Music library by persistent ID (cascades to all playlists)
+pub fn delete_track(persistent_id: &str) -> Result<()> {
+    let script = format!(
+        r#"tell application "Music"
+            try
+                delete (first track of library playlist 1 whose persistent ID is "{persistent_id}")
+            end try
+        end tell"#
+    );
+
+    run_osascript(&script)
+}
+
+/// Delete a track from Apple Music library by file path (fallback when no persistent ID)
+pub fn delete_track_by_path(path: &str) -> Result<()> {
+    let script = format!(
+        r#"tell application "Music"
+            try
+                set matchingTracks to (every track of library playlist 1 whose location is (POSIX file "{path}"))
+                repeat with t in matchingTracks
+                    delete t
+                end repeat
+            end try
+        end tell"#
+    );
+
+    run_osascript(&script)
+}
+
+/// Remove a track from a specific playlist (not from library) by persistent ID
+pub fn remove_track_from_playlist(persistent_id: &str, playlist: &str) -> Result<()> {
+    let script = format!(
+        r#"tell application "Music"
+            try
+                set thePlaylist to user playlist "{}"
+                delete (first track of thePlaylist whose persistent ID is "{persistent_id}")
+            end try
+        end tell"#,
+        escape_applescript(playlist)
+    );
+
+    run_osascript(&script)
+}
+
+/// Add track to playlist by persistent ID (precise, no substring matching)
+pub fn add_track_to_playlist_by_id(persistent_id: &str, playlist: &str) -> Result<()> {
+    create_playlist(playlist)?;
+
+    let script = format!(
+        r#"tell application "Music"
+            set thePlaylist to playlist "{}"
+            set theTrack to first track of library playlist 1 whose persistent ID is "{persistent_id}"
+            duplicate theTrack to thePlaylist
+        end tell"#,
+        escape_applescript(playlist)
+    );
+
+    run_osascript(&script)
+}
+
+/// Get persistent IDs of all tracks in an Apple Music playlist
+pub fn get_playlist_track_ids(playlist: &str) -> Result<Vec<String>> {
+    let script = format!(
+        r#"tell application "Music"
+            try
+                set thePlaylist to user playlist "{}"
+                set output to ""
+                repeat with t in tracks of thePlaylist
+                    set output to output & (persistent ID of t) & "§"
+                end repeat
+                return output
+            on error
+                return ""
+            end try
+        end tell"#,
+        escape_applescript(playlist)
+    );
+
+    let output = run_osascript_output(&script)?;
+    let ids: Vec<String> = output
+        .trim()
+        .split('§')
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .collect();
+
+    Ok(ids)
+}
+
 /// Delete a playlist from Apple Music
 pub fn delete_playlist(name: &str) -> Result<()> {
     let script = format!(

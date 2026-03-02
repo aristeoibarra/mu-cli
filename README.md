@@ -66,7 +66,7 @@ mu reimport "song title"
 ## Architecture
 
 ```
-mu add "song"    → yt-dlp → MP3 (with artwork) → imports to Apple Music
+mu add "song"    → yt-dlp → M4A/AAC 256kbps (with artwork) → imports to Apple Music
 mu play          → osascript → Apple Music plays
 mu playlist sync → syncs local playlists to Apple Music
 ```
@@ -75,7 +75,7 @@ mu playlist sync → syncs local playlists to Apple Music
 - **main.rs** — CLI routing (clap), command handlers
 - **music.rs** — Apple Music integration via osascript
 - **db.rs** — SQLite with WAL mode, foreign keys, auto-migration
-- **downloader.rs** — wraps `yt-dlp` subprocess (MP3 with embedded thumbnails)
+- **downloader.rs** — wraps `yt-dlp` subprocess (M4A/AAC with embedded thumbnails)
 
 ## Data
 
@@ -83,7 +83,7 @@ Location: `~/Library/Application Support/mu/`
 
 ```
 mu.db          SQLite (tracks, playlists)
-tracks/        downloaded mp3 files
+tracks/        downloaded m4a files
 artwork/       thumbnail images (jpg)
 ```
 

@@ -68,6 +68,20 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute("ALTER TABLE tracks ADD COLUMN album TEXT", [])?;
     }
 
+    // Add apple_music_id column if it doesn't exist (migration)
+    let has_apple_music_id: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('tracks') WHERE name='apple_music_id'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|c| c > 0)
+        .unwrap_or(false);
+
+    if !has_apple_music_id {
+        conn.execute("ALTER TABLE tracks ADD COLUMN apple_music_id TEXT", [])?;
+    }
+
     // Drop old podcast tables if they exist
     conn.execute_batch(
         "
@@ -131,23 +145,23 @@ pub fn resolve_track(conn: &Connection, track: &str) -> Option<(i64, String, Opt
 pub fn resolve_track_for_remove(
     conn: &Connection,
     track: &str,
-) -> Option<(i64, String, Option<String>)> {
+) -> Option<(i64, String, Option<String>, Option<String>)> {
     track
         .parse::<i64>()
         .ok()
         .and_then(|id| {
             conn.query_row(
-                "SELECT id, file_path, artwork_path FROM tracks WHERE id = ?1",
+                "SELECT id, file_path, artwork_path, apple_music_id FROM tracks WHERE id = ?1",
                 params![id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .ok()
         })
         .or_else(|| {
             conn.query_row(
-                "SELECT id, file_path, artwork_path FROM tracks WHERE title LIKE '%' || ?1 || '%' LIMIT 1",
+                "SELECT id, file_path, artwork_path, apple_music_id FROM tracks WHERE title LIKE '%' || ?1 || '%' LIMIT 1",
                 params![track],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .ok()
         })
@@ -202,6 +216,16 @@ pub fn resolve_track_row(conn: &Connection, track: &str) -> Option<TrackRow> {
             )
             .ok()
         })
+}
+
+pub fn get_apple_music_id(conn: &Connection, track_id: i64) -> Option<String> {
+    conn.query_row(
+        "SELECT apple_music_id FROM tracks WHERE id = ?1",
+        params![track_id],
+        |row| row.get(0),
+    )
+    .ok()
+    .flatten()
 }
 
 pub fn all_track_rows(conn: &Connection) -> crate::error::Result<Vec<TrackRow>> {

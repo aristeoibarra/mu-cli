@@ -8,14 +8,27 @@ pub fn handle_add(db_path: &Path, query: &str, playlist: Option<String>) -> Resu
     let result = downloader::download(query, &conn)?;
 
     let file_path = Path::new(&result.file);
-    if let Err(e) = music::import_with_metadata(
+    let persistent_id = match music::import_with_metadata(
         file_path,
         result.artist.as_deref(),
         result.album.as_deref(),
         Some("Music"),
     ) {
-        eprintln!("Warning: Failed to import to Apple Music: {e}");
-    }
+        Ok(import) => {
+            if let Some(ref pid) = import.persistent_id {
+                conn.execute(
+                    "UPDATE tracks SET apple_music_id = ?1 WHERE id = ?2",
+                    params![pid, result.id],
+                )
+                .ok();
+            }
+            import.persistent_id
+        }
+        Err(e) => {
+            eprintln!("Warning: Failed to import to Apple Music: {e}");
+            None
+        }
+    };
 
     if let Some(pl_name) = playlist {
         if let Some(pl_id) = db::resolve_playlist_id(&conn, &pl_name) {
@@ -26,7 +39,11 @@ pub fn handle_add(db_path: &Path, query: &str, playlist: Option<String>) -> Resu
             )
             .ok();
         }
-        let _ = music::add_track_to_playlist(&result.title, &pl_name);
+        if let Some(ref pid) = persistent_id {
+            let _ = music::add_track_to_playlist_by_id(pid, &pl_name);
+        } else {
+            let _ = music::add_track_to_playlist(&result.title, &pl_name);
+        }
     }
 
     println!("{}", serde_json::to_string(&result).unwrap());
