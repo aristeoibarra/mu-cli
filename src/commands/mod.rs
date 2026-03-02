@@ -1,1 +1,1 @@
-pub mod podcast_commands;
+// Commands module - currently empty, kept for future extensibility
