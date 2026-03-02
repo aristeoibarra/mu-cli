@@ -1,4 +1,4 @@
-use crate::error::{MuError, Result};
+use crate::error::{json_result, MuError, Result};
 use crate::{db, music};
 use clap::Subcommand;
 use rusqlite::{params, Connection};
@@ -29,6 +29,25 @@ pub enum PlaylistAction {
     Sync,
 }
 
+/// Validate playlist name: reject empty, too long, control chars, backslashes.
+fn validate_playlist_name(name: &str) -> Result<()> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(MuError::Validation("playlist name cannot be empty".into()));
+    }
+    if trimmed.len() > 255 {
+        return Err(MuError::Validation(
+            "playlist name too long (max 255 chars)".into(),
+        ));
+    }
+    if trimmed.chars().any(|c| c.is_control() || c == '\\') {
+        return Err(MuError::Validation(
+            "playlist name contains invalid characters".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub fn handle_playlist_action(db_path: &std::path::Path, action: PlaylistAction) -> Result<()> {
     let conn = db::open(db_path)?;
     match action {
@@ -44,15 +63,25 @@ pub fn handle_playlist_action(db_path: &std::path::Path, action: PlaylistAction)
 }
 
 fn playlist_create(conn: &Connection, name: &str) -> Result<()> {
+    validate_playlist_name(name)?;
+    let mut warnings = Vec::new();
     conn.execute("INSERT INTO playlists (name) VALUES (?1)", params![name])?;
     if let Err(e) = music::create_playlist(name) {
-        eprintln!("Warning: failed to create Apple Music playlist: {e}");
+        warnings.push(format!("failed to create Apple Music playlist: {e}"));
     }
-    println!("{}", serde_json::json!({"ok": true, "playlist": name}));
+    println!(
+        "{}",
+        json_result(
+            serde_json::json!({"ok": true, "playlist": name}),
+            &warnings,
+        )
+    );
     Ok(())
 }
 
 fn playlist_add(conn: &Connection, playlist: &str, track: &str) -> Result<()> {
+    validate_playlist_name(playlist)?;
+    let mut warnings = Vec::new();
     let pl_id = db::resolve_playlist_id(conn, playlist).ok_or(MuError::PlaylistNotFound)?;
     let (tid, title, _) = db::resolve_track(conn, track).ok_or(MuError::TrackNotFound)?;
 
@@ -62,39 +91,54 @@ fn playlist_add(conn: &Connection, playlist: &str, track: &str) -> Result<()> {
         params![pl_id, tid, pos],
     )?;
 
-    // Use persistent ID if available, fallback to name matching
-    if let Some(pid) = db::get_apple_music_id(conn, tid) {
-        if let Err(e) = music::add_track_to_playlist_by_id(&pid, playlist) {
-            eprintln!("Warning: failed to add track to Apple Music playlist: {e}");
-        }
-    } else if let Err(e) = music::add_track_to_playlist(&title, playlist) {
-        eprintln!("Warning: failed to add track to Apple Music playlist: {e}");
+    if let Err(e) = music::add_track_to_playlist_smart(
+        db::get_apple_music_id(conn, tid).as_deref(),
+        &title,
+        playlist,
+    ) {
+        warnings.push(format!("failed to add track to Apple Music playlist: {e}"));
     }
 
     println!(
         "{}",
-        serde_json::json!({"ok": true, "track_id": tid, "playlist": playlist})
+        json_result(
+            serde_json::json!({"ok": true, "track_id": tid, "playlist": playlist}),
+            &warnings,
+        )
     );
     Ok(())
 }
 
 fn playlist_remove(conn: &Connection, name: &str) -> Result<()> {
+    let mut warnings = Vec::new();
     conn.execute("DELETE FROM playlists WHERE name = ?1", params![name])?;
-    if let Err(e) = music::delete_playlist(name) {
-        eprintln!("Warning: failed to delete Apple Music playlist: {e}");
+    if conn.changes() == 0 {
+        return Err(MuError::PlaylistNotFound);
     }
-    println!("{}", serde_json::json!({"ok": true, "removed": name}));
+    if let Err(e) = music::delete_playlist(name) {
+        warnings.push(format!("failed to delete Apple Music playlist: {e}"));
+    }
+    println!(
+        "{}",
+        json_result(
+            serde_json::json!({"ok": true, "removed": name}),
+            &warnings,
+        )
+    );
     Ok(())
 }
 
 fn playlist_remove_track(conn: &Connection, playlist: &str, track: &str) -> Result<()> {
+    let mut warnings = Vec::new();
     let pl_id = db::resolve_playlist_id(conn, playlist).ok_or(MuError::PlaylistNotFound)?;
     let tid = db::resolve_track_id(conn, track).ok_or(MuError::TrackNotFound)?;
 
     // Remove from Apple Music playlist
     if let Some(pid) = db::get_apple_music_id(conn, tid) {
         if let Err(e) = music::remove_track_from_playlist(&pid, playlist) {
-            eprintln!("Warning: failed to remove track from Apple Music playlist: {e}");
+            warnings.push(format!(
+                "failed to remove track from Apple Music playlist: {e}"
+            ));
         }
     }
 
@@ -104,7 +148,10 @@ fn playlist_remove_track(conn: &Connection, playlist: &str, track: &str) -> Resu
     )?;
     println!(
         "{}",
-        serde_json::json!({ "ok": true, "removed_track_id": tid, "from_playlist": playlist })
+        json_result(
+            serde_json::json!({ "ok": true, "removed_track_id": tid, "from_playlist": playlist }),
+            &warnings,
+        )
     );
     Ok(())
 }
@@ -122,13 +169,13 @@ fn playlist_list(conn: &Connection) -> Result<()> {
                 "tracks": row.get::<_, i64>(1)?,
             }))
         })?
-        .filter_map(std::result::Result::ok)
-        .collect();
+        .collect::<std::result::Result<Vec<_>, _>>()?;
     println!("{}", serde_json::json!({"playlists": rows}));
     Ok(())
 }
 
 fn playlist_sync(conn: &Connection) -> Result<()> {
+    let mut warnings = Vec::new();
     let mut stmt = conn.prepare(
         "SELECT p.name, t.title, t.apple_music_id FROM playlists p
          JOIN playlist_tracks pt ON pt.playlist_id = p.id
@@ -139,8 +186,7 @@ fn playlist_sync(conn: &Connection) -> Result<()> {
     let rows: Vec<(String, String, Option<String>)> = stmt
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
         .map_err(MuError::from)?
-        .filter_map(std::result::Result::ok)
-        .collect();
+        .collect::<std::result::Result<Vec<_>, _>>()?;
 
     // Group tracks by playlist
     let mut playlist_tracks: std::collections::HashMap<String, Vec<(String, Option<String>)>> =
@@ -157,8 +203,7 @@ fn playlist_sync(conn: &Connection) -> Result<()> {
     let all_playlists: Vec<String> = pl_stmt
         .query_map([], |row| row.get(0))
         .map_err(MuError::from)?
-        .filter_map(std::result::Result::ok)
-        .collect();
+        .collect::<std::result::Result<Vec<_>, _>>()?;
     for name in &all_playlists {
         playlist_tracks.entry(name.clone()).or_default();
     }
@@ -169,19 +214,36 @@ fn playlist_sync(conn: &Connection) -> Result<()> {
     for (playlist_name, local_tracks) in &playlist_tracks {
         let _ = music::create_playlist(playlist_name);
 
+        // Get existing track IDs in Apple Music playlist to avoid duplicates
+        let existing_ids: std::collections::HashSet<String> =
+            music::get_playlist_track_ids(playlist_name)
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+
         // Collect local persistent IDs for this playlist
         let local_ids: std::collections::HashSet<String> = local_tracks
             .iter()
             .filter_map(|(_, pid)| pid.clone())
             .collect();
 
-        // Add missing tracks to Apple Music
+        // Add missing tracks to Apple Music (skip if already present)
         for (title, apple_music_id) in local_tracks {
             if let Some(pid) = apple_music_id {
-                if music::add_track_to_playlist_by_id(pid, playlist_name).is_ok() {
-                    tracks_added += 1;
+                if !existing_ids.contains(pid) {
+                    if let Err(e) = music::add_track_to_playlist_by_id(pid, playlist_name) {
+                        warnings.push(format!(
+                            "failed to add track to playlist '{playlist_name}': {e}"
+                        ));
+                    } else {
+                        tracks_added += 1;
+                    }
                 }
-            } else if music::add_track_to_playlist(title, playlist_name).is_ok() {
+            } else if let Err(e) = music::add_track_to_playlist(title, playlist_name) {
+                warnings.push(format!(
+                    "failed to add track '{title}' to playlist '{playlist_name}': {e}"
+                ));
+            } else {
                 tracks_added += 1;
             }
         }
@@ -189,10 +251,14 @@ fn playlist_sync(conn: &Connection) -> Result<()> {
         // Remove extra tracks from Apple Music playlist (bidirectional sync)
         if let Ok(am_ids) = music::get_playlist_track_ids(playlist_name) {
             for am_id in &am_ids {
-                if !local_ids.contains(am_id)
-                    && music::remove_track_from_playlist(am_id, playlist_name).is_ok()
-                {
-                    tracks_removed += 1;
+                if !local_ids.contains(am_id) {
+                    if let Err(e) = music::remove_track_from_playlist(am_id, playlist_name) {
+                        warnings.push(format!(
+                            "failed to remove extra track from playlist '{playlist_name}': {e}"
+                        ));
+                    } else {
+                        tracks_removed += 1;
+                    }
                 }
             }
         }
@@ -200,12 +266,46 @@ fn playlist_sync(conn: &Connection) -> Result<()> {
 
     println!(
         "{}",
-        serde_json::json!({
-            "ok": true,
-            "playlists_synced": playlist_tracks.len(),
-            "tracks_added": tracks_added,
-            "tracks_removed": tracks_removed,
-        })
+        json_result(
+            serde_json::json!({
+                "ok": true,
+                "playlists_synced": playlist_tracks.len(),
+                "tracks_added": tracks_added,
+                "tracks_removed": tracks_removed,
+            }),
+            &warnings,
+        )
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_playlist_name_normal() {
+        assert!(validate_playlist_name("My Playlist").is_ok());
+    }
+
+    #[test]
+    fn validate_playlist_name_empty() {
+        assert!(validate_playlist_name("").is_err());
+        assert!(validate_playlist_name("   ").is_err());
+    }
+
+    #[test]
+    fn validate_playlist_name_control_chars() {
+        assert!(validate_playlist_name("bad\x00name").is_err());
+        assert!(validate_playlist_name("bad\nnewline").is_err());
+        assert!(validate_playlist_name("back\\slash").is_err());
+    }
+
+    #[test]
+    fn validate_playlist_name_too_long() {
+        let long_name = "a".repeat(256);
+        assert!(validate_playlist_name(&long_name).is_err());
+        let ok_name = "a".repeat(255);
+        assert!(validate_playlist_name(&ok_name).is_ok());
+    }
 }

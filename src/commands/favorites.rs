@@ -1,4 +1,4 @@
-use crate::error::{MuError, Result};
+use crate::error::{json_result, MuError, Result};
 use crate::{db, music};
 use clap::Subcommand;
 use rusqlite::params;
@@ -27,37 +27,34 @@ pub fn handle_fav_action(db_path: &Path, action: FavAction) -> Result<()> {
 }
 
 fn fav_toggle(conn: &rusqlite::Connection, track: &str) -> Result<()> {
+    let mut warnings = Vec::new();
     let (tid, title, _) = db::resolve_track(conn, track).ok_or(MuError::TrackNotFound)?;
 
-    let current: bool = conn
-        .query_row(
-            "SELECT COALESCE(favorite, 0) FROM tracks WHERE id = ?1",
-            params![tid],
-            |row| row.get::<_, bool>(0),
-        )
-        .unwrap_or(false);
-
-    let new_val = !current;
-    conn.execute(
-        "UPDATE tracks SET favorite = ?1 WHERE id = ?2",
-        params![new_val, tid],
+    // Atomic toggle using RETURNING
+    let new_val: bool = conn.query_row(
+        "UPDATE tracks SET favorite = NOT COALESCE(favorite, 0) WHERE id = ?1 RETURNING favorite",
+        params![tid],
+        |row| row.get(0),
     )?;
 
     // Sync to Apple Music if we have a persistent ID
     if let Some(pid) = db::get_apple_music_id(conn, tid) {
         if let Err(e) = music::set_track_loved(&pid, new_val) {
-            eprintln!("Warning: failed to sync favorite to Apple Music: {e}");
+            warnings.push(format!("failed to sync favorite to Apple Music: {e}"));
         }
     }
 
     println!(
         "{}",
-        serde_json::json!({
-            "ok": true,
-            "track_id": tid,
-            "title": title,
-            "favorite": new_val,
-        })
+        json_result(
+            serde_json::json!({
+                "ok": true,
+                "track_id": tid,
+                "title": title,
+                "favorite": new_val,
+            }),
+            &warnings,
+        )
     );
     Ok(())
 }
@@ -74,8 +71,7 @@ fn fav_sync(conn: &rusqlite::Connection) -> Result<()> {
     let tracks: Vec<(i64, String, bool)> = stmt
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
         .map_err(MuError::from)?
-        .filter_map(std::result::Result::ok)
-        .collect();
+        .collect::<std::result::Result<Vec<_>, _>>()?;
 
     let mut added = 0i64;
     let mut removed = 0i64;
@@ -123,8 +119,7 @@ fn fav_list(conn: &rusqlite::Connection) -> Result<()> {
                 "artwork": row.get::<_, Option<String>>(5)?,
             }))
         })?
-        .filter_map(std::result::Result::ok)
-        .collect();
+        .collect::<std::result::Result<Vec<_>, _>>()?;
     println!("{}", serde_json::json!({"favorites": rows}));
     Ok(())
 }

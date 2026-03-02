@@ -1,4 +1,4 @@
-use crate::error::Result;
+use crate::error::{json_result, Result};
 use crate::{db, downloader, music};
 use rusqlite::params;
 use std::path::Path;
@@ -6,13 +6,13 @@ use std::path::Path;
 pub fn handle_add(db_path: &Path, query: &str, playlist: Option<String>) -> Result<()> {
     let conn = db::open(db_path)?;
     let result = downloader::download(query, &conn)?;
+    let mut warnings = Vec::new();
 
     let file_path = Path::new(&result.file);
     let persistent_id = match music::import_with_metadata(
         file_path,
         result.artist.as_deref(),
         result.album.as_deref(),
-        Some("Music"),
     ) {
         Ok(import) => {
             if let Some(ref pid) = import.persistent_id {
@@ -20,13 +20,13 @@ pub fn handle_add(db_path: &Path, query: &str, playlist: Option<String>) -> Resu
                     "UPDATE tracks SET apple_music_id = ?1 WHERE id = ?2",
                     params![pid, result.id],
                 ) {
-                    eprintln!("Warning: failed to save apple_music_id: {e}");
+                    warnings.push(format!("failed to save apple_music_id: {e}"));
                 }
             }
             import.persistent_id
         }
         Err(e) => {
-            eprintln!("Warning: Failed to import to Apple Music: {e}");
+            warnings.push(format!("failed to import to Apple Music: {e}"));
             None
         }
     };
@@ -38,18 +38,32 @@ pub fn handle_add(db_path: &Path, query: &str, playlist: Option<String>) -> Resu
                 "INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position) VALUES (?1, ?2, ?3)",
                 params![pl_id, result.id, pos],
             ) {
-                eprintln!("Warning: failed to add track to playlist in DB: {e}");
+                warnings.push(format!("failed to add track to playlist in DB: {e}"));
             }
         }
-        if let Some(ref pid) = persistent_id {
-            if let Err(e) = music::add_track_to_playlist_by_id(pid, &pl_name) {
-                eprintln!("Warning: failed to add track to Apple Music playlist: {e}");
-            }
-        } else if let Err(e) = music::add_track_to_playlist(&result.title, &pl_name) {
-            eprintln!("Warning: failed to add track to Apple Music playlist: {e}");
+        if let Err(e) = music::add_track_to_playlist_smart(
+            persistent_id.as_deref(),
+            &result.title,
+            &pl_name,
+        ) {
+            warnings.push(format!("failed to add track to Apple Music playlist: {e}"));
         }
     }
 
-    println!("{}", serde_json::to_string(&result).unwrap());
+    println!(
+        "{}",
+        json_result(
+            serde_json::json!({
+                "ok": true,
+                "id": result.id,
+                "title": result.title,
+                "artist": result.artist,
+                "album": result.album,
+                "file": result.file,
+                "artwork": result.artwork,
+            }),
+            &warnings,
+        )
+    );
     Ok(())
 }

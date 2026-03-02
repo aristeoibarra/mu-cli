@@ -3,24 +3,25 @@ use serde::Serialize;
 use std::path::Path;
 use std::process::Command;
 
+const FIELD_SEP: char = '\x1E'; // ASCII Record Separator
+const RECORD_SEP: char = '\x1D'; // ASCII Group Separator
+
 /// Result of importing a track to Apple Music
 #[derive(Debug, Serialize)]
 pub struct ImportResult {
-    pub success: bool,
     pub track_name: Option<String>,
     pub persistent_id: Option<String>,
 }
 
-/// Import track and set metadata (artist, album)
+/// Import track and set metadata (artist, album). Genre is always "Music".
 pub fn import_with_metadata(
     path: &Path,
     artist: Option<&str>,
     album: Option<&str>,
-    genre: Option<&str>,
 ) -> Result<ImportResult> {
-    let path_str = path.to_string_lossy();
+    let path_str = escape_applescript(&path.to_string_lossy());
 
-    let mut set_props = Vec::new();
+    let mut set_props = vec!["set genre of theTrack to \"Music\"".to_string()];
     if let Some(a) = artist {
         set_props.push(format!(
             "set artist of theTrack to \"{}\"",
@@ -33,14 +34,9 @@ pub fn import_with_metadata(
             escape_applescript(a)
         ));
     }
-    if let Some(g) = genre {
-        set_props.push(format!(
-            "set genre of theTrack to \"{}\"",
-            escape_applescript(g)
-        ));
-    }
 
     let set_commands = set_props.join("\n            ");
+    let fs = FIELD_SEP;
 
     let script = format!(
         r#"tell application "Music"
@@ -48,15 +44,14 @@ pub fn import_with_metadata(
             {set_commands}
             set trackName to name of theTrack
             set trackId to persistent ID of theTrack
-            return trackName & "|" & trackId
+            return trackName & "{fs}" & trackId
         end tell"#
     );
 
     let output = run_osascript_output(&script)?;
-    let parts: Vec<&str> = output.trim().split('|').collect();
+    let parts: Vec<&str> = output.trim().split(FIELD_SEP).collect();
 
     Ok(ImportResult {
-        success: true,
         track_name: parts.first().map(ToString::to_string),
         persistent_id: parts.get(1).map(ToString::to_string),
     })
@@ -64,7 +59,7 @@ pub fn import_with_metadata(
 
 /// Check if a track is already in Apple Music library by file path
 pub fn is_track_in_library(path: &Path) -> bool {
-    let path_str = path.to_string_lossy();
+    let path_str = escape_applescript(&path.to_string_lossy());
     let script = format!(
         r#"tell application "Music"
             try
@@ -143,7 +138,9 @@ pub fn previous_track() -> Result<()> {
 
 /// Get current playback status
 pub fn get_status() -> Result<PlaybackStatus> {
-    let script = r#"tell application "Music"
+    let fs = FIELD_SEP;
+    let script = format!(
+        r#"tell application "Music"
         set output to ""
         try
             set t to current track
@@ -153,15 +150,16 @@ pub fn get_status() -> Result<PlaybackStatus> {
             set state to player state as string
             set pos to player position
             set dur to duration of t
-            set output to trackName & "|" & trackArtist & "|" & trackAlbum & "|" & state & "|" & pos & "|" & dur
+            set output to trackName & "{fs}" & trackArtist & "{fs}" & trackAlbum & "{fs}" & state & "{fs}" & pos & "{fs}" & dur
         on error
-            set output to "||stopped|0|0"
+            set output to "{fs}{fs}stopped{fs}0{fs}0"
         end try
         return output
-    end tell"#;
+    end tell"#
+    );
 
-    let output = run_osascript_output(script)?;
-    let parts: Vec<&str> = output.trim().split('|').collect();
+    let output = run_osascript_output(&script)?;
+    let parts: Vec<&str> = output.trim().split(FIELD_SEP).collect();
 
     if parts.len() >= 6 {
         Ok(PlaybackStatus {
@@ -230,12 +228,26 @@ pub fn add_track_to_playlist(track_name: &str, playlist: &str) -> Result<()> {
     run_osascript(&script)
 }
 
+/// Add track to playlist using persistent ID if available, fallback to name matching
+pub fn add_track_to_playlist_smart(
+    persistent_id: Option<&str>,
+    track_name: &str,
+    playlist: &str,
+) -> Result<()> {
+    if let Some(pid) = persistent_id {
+        add_track_to_playlist_by_id(pid, playlist)
+    } else {
+        add_track_to_playlist(track_name, playlist)
+    }
+}
+
 /// Delete a track from Apple Music library by persistent ID (cascades to all playlists)
 pub fn delete_track(persistent_id: &str) -> Result<()> {
+    let escaped_id = escape_applescript(persistent_id);
     let script = format!(
         r#"tell application "Music"
             try
-                delete (first track of library playlist 1 whose persistent ID is "{persistent_id}")
+                delete (first track of library playlist 1 whose persistent ID is "{escaped_id}")
             end try
         end tell"#
     );
@@ -245,10 +257,11 @@ pub fn delete_track(persistent_id: &str) -> Result<()> {
 
 /// Delete a track from Apple Music library by file path (fallback when no persistent ID)
 pub fn delete_track_by_path(path: &str) -> Result<()> {
+    let escaped_path = escape_applescript(path);
     let script = format!(
         r#"tell application "Music"
             try
-                set matchingTracks to (every track of library playlist 1 whose location is (POSIX file "{path}"))
+                set matchingTracks to (every track of library playlist 1 whose location is (POSIX file "{escaped_path}"))
                 repeat with t in matchingTracks
                     delete t
                 end repeat
@@ -261,11 +274,12 @@ pub fn delete_track_by_path(path: &str) -> Result<()> {
 
 /// Remove a track from a specific playlist (not from library) by persistent ID
 pub fn remove_track_from_playlist(persistent_id: &str, playlist: &str) -> Result<()> {
+    let escaped_id = escape_applescript(persistent_id);
     let script = format!(
         r#"tell application "Music"
             try
                 set thePlaylist to user playlist "{}"
-                delete (first track of thePlaylist whose persistent ID is "{persistent_id}")
+                delete (first track of thePlaylist whose persistent ID is "{escaped_id}")
             end try
         end tell"#,
         escape_applescript(playlist)
@@ -278,10 +292,11 @@ pub fn remove_track_from_playlist(persistent_id: &str, playlist: &str) -> Result
 pub fn add_track_to_playlist_by_id(persistent_id: &str, playlist: &str) -> Result<()> {
     create_playlist(playlist)?;
 
+    let escaped_id = escape_applescript(persistent_id);
     let script = format!(
         r#"tell application "Music"
             set thePlaylist to playlist "{}"
-            set theTrack to first track of library playlist 1 whose persistent ID is "{persistent_id}"
+            set theTrack to first track of library playlist 1 whose persistent ID is "{escaped_id}"
             duplicate theTrack to thePlaylist
         end tell"#,
         escape_applescript(playlist)
@@ -292,13 +307,14 @@ pub fn add_track_to_playlist_by_id(persistent_id: &str, playlist: &str) -> Resul
 
 /// Get persistent IDs of all tracks in an Apple Music playlist
 pub fn get_playlist_track_ids(playlist: &str) -> Result<Vec<String>> {
+    let rs = RECORD_SEP;
     let script = format!(
         r#"tell application "Music"
             try
                 set thePlaylist to user playlist "{}"
                 set output to ""
                 repeat with t in tracks of thePlaylist
-                    set output to output & (persistent ID of t) & "§"
+                    set output to output & (persistent ID of t) & "{rs}"
                 end repeat
                 return output
             on error
@@ -311,7 +327,7 @@ pub fn get_playlist_track_ids(playlist: &str) -> Result<Vec<String>> {
     let output = run_osascript_output(&script)?;
     let ids: Vec<String> = output
         .trim()
-        .split('§')
+        .split(RECORD_SEP)
         .filter(|s| !s.is_empty())
         .map(ToString::to_string)
         .collect();
@@ -335,23 +351,27 @@ pub fn delete_playlist(name: &str) -> Result<()> {
 
 /// Get list of all user playlists in Apple Music
 pub fn list_playlists() -> Result<Vec<PlaylistInfo>> {
-    let script = r#"tell application "Music"
+    let fs = FIELD_SEP;
+    let rs = RECORD_SEP;
+    let script = format!(
+        r#"tell application "Music"
         set output to ""
         repeat with p in user playlists
             set pName to name of p
             set pCount to count of tracks of p
-            set output to output & pName & "|" & pCount & "§"
+            set output to output & pName & "{fs}" & pCount & "{rs}"
         end repeat
         return output
-    end tell"#;
+    end tell"#
+    );
 
-    let output = run_osascript_output(script)?;
+    let output = run_osascript_output(&script)?;
     let playlists: Vec<PlaylistInfo> = output
         .trim()
-        .split('§')
+        .split(RECORD_SEP)
         .filter(|s| !s.is_empty())
         .filter_map(|s| {
-            let parts: Vec<&str> = s.split('|').collect();
+            let parts: Vec<&str> = s.split(FIELD_SEP).collect();
             if parts.len() >= 2 {
                 Some(PlaylistInfo {
                     name: parts[0].to_string(),
@@ -366,21 +386,23 @@ pub fn list_playlists() -> Result<Vec<PlaylistInfo>> {
     Ok(playlists)
 }
 
-/// Get track count in Apple Music library
+/// Get track count and total duration in Apple Music library (batch query)
 pub fn get_library_stats() -> Result<LibraryStats> {
-    let script = r#"tell application "Music"
+    let fs = FIELD_SEP;
+    let script = format!(
+        r#"tell application "Music"
         set trackCount to count of tracks of library playlist 1
+        set durations to duration of every track of library playlist 1
         set totalTime to 0
-        repeat with t in tracks of library playlist 1
-            try
-                set totalTime to totalTime + (duration of t)
-            end try
+        repeat with d in durations
+            set totalTime to totalTime + d
         end repeat
-        return (trackCount as string) & "|" & (totalTime as string)
-    end tell"#;
+        return (trackCount as string) & "{fs}" & (totalTime as string)
+    end tell"#
+    );
 
-    let output = run_osascript_output(script)?;
-    let parts: Vec<&str> = output.trim().split('|').collect();
+    let output = run_osascript_output(&script)?;
+    let parts: Vec<&str> = output.trim().split(FIELD_SEP).collect();
 
     Ok(LibraryStats {
         track_count: parts.first().and_then(|s| s.parse().ok()).unwrap_or(0),
@@ -413,9 +435,10 @@ pub struct LibraryStats {
 /// Set the favorited property on a track by persistent ID
 pub fn set_track_loved(persistent_id: &str, loved: bool) -> Result<()> {
     let loved_str = if loved { "true" } else { "false" };
+    let escaped_id = escape_applescript(persistent_id);
     let script = format!(
         r#"tell application "Music"
-            set theTrack to first track of library playlist 1 whose persistent ID is "{persistent_id}"
+            set theTrack to first track of library playlist 1 whose persistent ID is "{escaped_id}"
             set favorited of theTrack to {loved_str}
         end tell"#
     );
@@ -425,18 +448,21 @@ pub fn set_track_loved(persistent_id: &str, loved: bool) -> Result<()> {
 
 /// Get persistent IDs of all favorited tracks in Apple Music library
 pub fn get_loved_track_ids() -> Result<Vec<String>> {
-    let script = r#"tell application "Music"
+    let rs = RECORD_SEP;
+    let script = format!(
+        r#"tell application "Music"
         set output to ""
         repeat with t in (every track of library playlist 1 whose favorited is true)
-            set output to output & (persistent ID of t) & "§"
+            set output to output & (persistent ID of t) & "{rs}"
         end repeat
         return output
-    end tell"#;
+    end tell"#
+    );
 
-    let output = run_osascript_output(script)?;
+    let output = run_osascript_output(&script)?;
     let ids: Vec<String> = output
         .trim()
-        .split('§')
+        .split(RECORD_SEP)
         .filter(|s| !s.is_empty())
         .map(ToString::to_string)
         .collect();
@@ -445,7 +471,7 @@ pub fn get_loved_track_ids() -> Result<Vec<String>> {
 }
 
 /// Escape special characters for `AppleScript` strings
-fn escape_applescript(s: &str) -> String {
+pub fn escape_applescript(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
@@ -474,5 +500,33 @@ fn run_osascript_output(script: &str) -> Result<String> {
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         Err(MuError::AppleScript(stderr.trim().to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escape_applescript_quotes() {
+        assert_eq!(escape_applescript(r#"say "hello""#), r#"say \"hello\""#);
+    }
+
+    #[test]
+    fn escape_applescript_backslashes() {
+        assert_eq!(escape_applescript(r"path\to\file"), r"path\\to\\file");
+    }
+
+    #[test]
+    fn escape_applescript_combined() {
+        assert_eq!(
+            escape_applescript(r#"a\"b"#),
+            r#"a\\\"b"#
+        );
+    }
+
+    #[test]
+    fn escape_applescript_clean_input() {
+        assert_eq!(escape_applescript("hello world"), "hello world");
     }
 }

@@ -5,9 +5,10 @@ use serde::Serialize;
 use std::path::Path;
 use std::process::Command;
 
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+
 #[derive(Serialize)]
 pub struct AddResult {
-    pub added: bool,
     pub id: i64,
     pub title: String,
     pub artist: Option<String>,
@@ -108,8 +109,29 @@ fn run_yt_dlp(args: &[&str]) -> Result<std::process::Output> {
         })
 }
 
+/// Validate video ID: only alphanumeric, hyphens, underscores allowed.
+fn validate_video_id(id: &str) -> Result<()> {
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(MuError::Validation(format!("invalid video id: {id}")));
+    }
+    Ok(())
+}
+
+/// Proper URL encoding for search queries
+fn urlencode(s: &str) -> String {
+    utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
+}
+
 #[allow(clippy::too_many_lines)]
 pub fn download(query: &str, conn: &Connection) -> Result<AddResult> {
+    if query.trim().is_empty() {
+        return Err(MuError::Validation("query cannot be empty".into()));
+    }
+
     let data_dir = db::data_dir()?;
     let tracks_dir = data_dir.join("tracks");
     let artwork_dir = data_dir.join("artwork");
@@ -147,6 +169,8 @@ pub fn download(query: &str, conn: &Connection) -> Result<AddResult> {
     let duration: i64 = lines[2].parse().unwrap_or(0);
     let video_id = lines[3].to_string();
     let thumbnail_url = lines[4].to_string();
+
+    validate_video_id(&video_id)?;
 
     // Check for duplicate: use original query for URLs, constructed URL for searches
     let source_url = if is_url {
@@ -231,7 +255,6 @@ pub fn download(query: &str, conn: &Connection) -> Result<AddResult> {
     let id = conn.last_insert_rowid();
 
     Ok(AddResult {
-        added: true,
         id,
         title,
         artist,
@@ -261,7 +284,7 @@ fn fetch_itunes_artwork(
 
     let url = format!(
         "https://itunes.apple.com/search?term={}&media=music&limit=1",
-        urlencod(&search_term)
+        urlencode(&search_term)
     );
 
     let result = Command::new("curl")
@@ -294,14 +317,6 @@ fn fetch_itunes_artwork(
     } else {
         None
     }
-}
-
-/// Minimal URL encoding for iTunes search queries
-fn urlencod(s: &str) -> String {
-    s.replace(' ', "+")
-        .replace('&', "%26")
-        .replace('?', "%3F")
-        .replace('#', "%23")
 }
 
 /// Download artwork/thumbnail to artwork directory (`YouTube` fallback)
@@ -510,5 +525,49 @@ mod tests {
     fn parse_album_no_match_returns_none() {
         let album = parse_album("Just a Normal Title", None);
         assert_eq!(album, None);
+    }
+
+    // --- validate_video_id ---
+
+    #[test]
+    fn validate_video_id_normal() {
+        assert!(validate_video_id("dQw4w9WgXcQ").is_ok());
+    }
+
+    #[test]
+    fn validate_video_id_with_hyphens_underscores() {
+        assert!(validate_video_id("abc-def_123").is_ok());
+    }
+
+    #[test]
+    fn validate_video_id_path_traversal() {
+        assert!(validate_video_id("../../../etc/passwd").is_err());
+    }
+
+    #[test]
+    fn validate_video_id_empty() {
+        assert!(validate_video_id("").is_err());
+    }
+
+    #[test]
+    fn validate_video_id_special_chars() {
+        assert!(validate_video_id("id;rm -rf /").is_err());
+    }
+
+    // --- urlencode ---
+
+    #[test]
+    fn urlencode_spaces_and_special() {
+        let encoded = urlencode("hello world & more");
+        assert!(encoded.contains("%20") || encoded.contains('+'));
+        assert!(encoded.contains("%26"));
+        assert!(!encoded.contains(' '));
+        assert!(!encoded.contains('&'));
+    }
+
+    #[test]
+    fn urlencode_plain_ascii() {
+        let encoded = urlencode("hello");
+        assert_eq!(encoded, "hello");
     }
 }

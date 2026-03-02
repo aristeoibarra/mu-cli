@@ -1,4 +1,4 @@
-use crate::error::{MuError, Result};
+use crate::error::{json_result, MuError, Result};
 use crate::{db, music};
 use rusqlite::params;
 use std::path::Path;
@@ -10,11 +10,19 @@ pub fn handle_status(db_path: &Path) -> Result<()> {
         .as_ref()
         .and_then(|track_name| {
             let conn = db::open(db_path).ok()?;
+            // Try exact match first, fallback to LIKE
             conn.query_row(
-                "SELECT COALESCE(favorite, 0) FROM tracks WHERE title LIKE '%' || ?1 || '%' LIMIT 1",
+                "SELECT COALESCE(favorite, 0) FROM tracks WHERE title = ?1",
                 params![track_name],
                 |row| row.get::<_, bool>(0),
             )
+            .or_else(|_| {
+                conn.query_row(
+                    "SELECT COALESCE(favorite, 0) FROM tracks WHERE title LIKE '%' || ?1 || '%' LIMIT 1",
+                    params![track_name],
+                    |row| row.get::<_, bool>(0),
+                )
+            })
             .ok()
         })
         .unwrap_or(false);
@@ -55,8 +63,7 @@ pub fn handle_list(db_path: &Path, playlist: Option<&str>) -> Result<()> {
                     "favorite": row.get::<_, bool>(6)?,
                 }))
             })?
-            .filter_map(std::result::Result::ok)
-            .collect();
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         println!(
             "{}",
             serde_json::json!({"playlist": pl_name, "tracks": rows})
@@ -77,8 +84,7 @@ pub fn handle_list(db_path: &Path, playlist: Option<&str>) -> Result<()> {
                     "favorite": row.get::<_, bool>(6)?,
                 }))
             })?
-            .filter_map(std::result::Result::ok)
-            .collect();
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         println!("{}", serde_json::json!({"tracks": rows}));
     }
     Ok(())
@@ -86,16 +92,17 @@ pub fn handle_list(db_path: &Path, playlist: Option<&str>) -> Result<()> {
 
 pub fn handle_remove(db_path: &Path, track: &str) -> Result<()> {
     let conn = db::open(db_path)?;
+    let mut warnings = Vec::new();
     let (tid, file_path, artwork_path, apple_music_id) =
         db::resolve_track_for_remove(&conn, track).ok_or(MuError::TrackNotFound)?;
 
     // Remove from Apple Music (by persistent ID, fallback to file path)
     if let Some(ref pid) = apple_music_id {
         if let Err(e) = music::delete_track(pid) {
-            eprintln!("Warning: failed to remove from Apple Music: {e}");
+            warnings.push(format!("failed to remove from Apple Music: {e}"));
         }
     } else if let Err(e) = music::delete_track_by_path(&file_path) {
-        eprintln!("Warning: failed to remove from Apple Music: {e}");
+        warnings.push(format!("failed to remove from Apple Music: {e}"));
     }
 
     conn.execute(
@@ -109,7 +116,10 @@ pub fn handle_remove(db_path: &Path, track: &str) -> Result<()> {
     }
     println!(
         "{}",
-        serde_json::json!({"ok": true, "removed_id": tid, "file_deleted": file_path})
+        json_result(
+            serde_json::json!({"ok": true, "removed_id": tid, "file_deleted": file_path}),
+            &warnings,
+        )
     );
     Ok(())
 }
@@ -132,16 +142,19 @@ pub fn handle_migrate(db_path: &Path, dry_run: bool) -> Result<()> {
         return Ok(());
     }
 
-    let (imported, skipped, failed) = import_tracks(&conn, &tracks);
+    let (imported, skipped, failed, warnings) = import_tracks_inner(&conn, &tracks, true);
     println!(
         "{}",
-        serde_json::json!({
-            "ok": true,
-            "total": tracks.len(),
-            "imported": imported,
-            "skipped": skipped,
-            "failed": failed,
-        })
+        json_result(
+            serde_json::json!({
+                "ok": true,
+                "total": tracks.len(),
+                "imported": imported,
+                "skipped": skipped,
+                "failed": failed,
+            }),
+            &warnings,
+        )
     );
     Ok(())
 }
@@ -176,85 +189,61 @@ pub fn handle_reimport(db_path: &Path, track: Option<&str>) -> Result<()> {
         db::all_track_rows(&conn)?
     };
 
-    let mut reimported = 0;
-    let mut failed = 0;
-
-    for (id, title, artist, album, file_path) in &tracks {
-        let path = Path::new(file_path);
-
-        if !path.exists() {
-            failed += 1;
-            eprintln!("File not found: {file_path}");
-            continue;
-        }
-
-        match music::import_with_metadata(path, artist.as_deref(), album.as_deref(), Some("Music"))
-        {
-            Ok(import) => {
-                if let Some(ref pid) = import.persistent_id {
-                    if let Err(e) = conn.execute(
-                        "UPDATE tracks SET apple_music_id = ?1 WHERE id = ?2",
-                        params![pid, id],
-                    ) {
-                        eprintln!("Warning: failed to save apple_music_id for '{title}': {e}");
-                    }
-                }
-                reimported += 1;
-                eprintln!("Reimported: {title} by {artist:?}");
-            }
-            Err(e) => {
-                failed += 1;
-                eprintln!("Failed: {title}: {e}");
-            }
-        }
-    }
-
+    let (reimported, _, failed, warnings) = import_tracks_inner(&conn, &tracks, false);
     println!(
         "{}",
-        serde_json::json!({ "ok": true, "reimported": reimported, "failed": failed, "total": tracks.len() })
+        json_result(
+            serde_json::json!({ "ok": true, "reimported": reimported, "failed": failed, "total": tracks.len() }),
+            &warnings,
+        )
     );
     Ok(())
 }
 
-fn import_tracks(conn: &rusqlite::Connection, tracks: &[db::TrackRow]) -> (i64, i64, i64) {
+/// Shared import loop for migrate and reimport.
+/// When `check_existing` is true, skips tracks already in Apple Music (migrate behavior).
+fn import_tracks_inner(
+    conn: &rusqlite::Connection,
+    tracks: &[db::TrackRow],
+    check_existing: bool,
+) -> (i64, i64, i64, Vec<String>) {
     let mut imported = 0;
     let mut skipped = 0;
     let mut failed = 0;
+    let mut warnings = Vec::new();
 
     for (id, title, artist, album, file_path) in tracks {
         let path = Path::new(file_path);
 
         if !path.exists() {
             failed += 1;
-            eprintln!("File not found: {file_path}");
+            warnings.push(format!("file not found: {file_path}"));
             continue;
         }
 
-        if music::is_track_in_library(path) {
+        if check_existing && music::is_track_in_library(path) {
             skipped += 1;
             continue;
         }
 
-        match music::import_with_metadata(path, artist.as_deref(), album.as_deref(), Some("Music"))
-        {
+        match music::import_with_metadata(path, artist.as_deref(), album.as_deref()) {
             Ok(import) => {
                 if let Some(ref pid) = import.persistent_id {
                     if let Err(e) = conn.execute(
                         "UPDATE tracks SET apple_music_id = ?1 WHERE id = ?2",
                         params![pid, id],
                     ) {
-                        eprintln!("Warning: failed to save apple_music_id for '{title}': {e}");
+                        warnings.push(format!("failed to save apple_music_id for '{title}': {e}"));
                     }
                 }
                 imported += 1;
-                eprintln!("Imported: {title}");
             }
             Err(e) => {
                 failed += 1;
-                eprintln!("Failed to import {title}: {e}");
+                warnings.push(format!("failed to import '{title}': {e}"));
             }
         }
     }
 
-    (imported, skipped, failed)
+    (imported, skipped, failed, warnings)
 }
