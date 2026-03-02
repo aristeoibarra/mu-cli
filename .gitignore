@@ -1,1 +1,7 @@
 /target
+.agents/
+.claude/
+.kiro/
+.windsurf/
+.agent/
+skills-lock.json
