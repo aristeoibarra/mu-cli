@@ -1,3 +1,4 @@
+use crate::error::{MuError, Result};
 use serde::Serialize;
 use std::path::Path;
 use std::process::Command;
@@ -16,10 +17,9 @@ pub fn import_with_metadata(
     artist: Option<&str>,
     album: Option<&str>,
     genre: Option<&str>,
-) -> Result<ImportResult, String> {
+) -> Result<ImportResult> {
     let path_str = path.to_string_lossy();
 
-    // Build metadata setting commands
     let mut set_props = Vec::new();
     if let Some(a) = artist {
         set_props.push(format!(
@@ -82,7 +82,7 @@ pub fn is_track_in_library(path: &Path) -> bool {
 }
 
 /// Play all tracks in library or a specific playlist
-pub fn play_playlist(playlist: Option<&str>) -> Result<(), String> {
+pub fn play_playlist(playlist: Option<&str>) -> Result<()> {
     let script = match playlist {
         Some(name) => format!(
             r#"tell application "Music"
@@ -105,7 +105,7 @@ pub fn play_playlist(playlist: Option<&str>) -> Result<(), String> {
 }
 
 /// Play a specific track by name
-pub fn play_track(track_name: &str) -> Result<(), String> {
+pub fn play_track(track_name: &str) -> Result<()> {
     let script = format!(
         r#"tell application "Music"
             play (first track of library playlist 1 whose name contains "{}")
@@ -117,32 +117,32 @@ pub fn play_track(track_name: &str) -> Result<(), String> {
 }
 
 /// Pause playback
-pub fn pause() -> Result<(), String> {
+pub fn pause() -> Result<()> {
     run_osascript(r#"tell application "Music" to pause"#)
 }
 
 /// Resume playback
-pub fn resume() -> Result<(), String> {
+pub fn resume() -> Result<()> {
     run_osascript(r#"tell application "Music" to play"#)
 }
 
 /// Stop playback
-pub fn stop() -> Result<(), String> {
+pub fn stop() -> Result<()> {
     run_osascript(r#"tell application "Music" to stop"#)
 }
 
 /// Next track
-pub fn next_track() -> Result<(), String> {
+pub fn next_track() -> Result<()> {
     run_osascript(r#"tell application "Music" to next track"#)
 }
 
 /// Previous track
-pub fn previous_track() -> Result<(), String> {
+pub fn previous_track() -> Result<()> {
     run_osascript(r#"tell application "Music" to previous track"#)
 }
 
 /// Get current playback status
-pub fn get_status() -> Result<PlaybackStatus, String> {
+pub fn get_status() -> Result<PlaybackStatus> {
     let script = r#"tell application "Music"
         set output to ""
         try
@@ -197,7 +197,7 @@ pub fn get_status() -> Result<PlaybackStatus, String> {
 }
 
 /// Create a playlist in Music.app
-pub fn create_playlist(name: &str) -> Result<(), String> {
+pub fn create_playlist(name: &str) -> Result<()> {
     let script = format!(
         r#"tell application "Music"
             try
@@ -214,8 +214,7 @@ pub fn create_playlist(name: &str) -> Result<(), String> {
 }
 
 /// Add existing track (by name) to playlist
-pub fn add_track_to_playlist(track_name: &str, playlist: &str) -> Result<(), String> {
-    // First ensure playlist exists
+pub fn add_track_to_playlist(track_name: &str, playlist: &str) -> Result<()> {
     create_playlist(playlist)?;
 
     let script = format!(
@@ -232,7 +231,7 @@ pub fn add_track_to_playlist(track_name: &str, playlist: &str) -> Result<(), Str
 }
 
 /// Delete a playlist from Apple Music
-pub fn delete_playlist(name: &str) -> Result<(), String> {
+pub fn delete_playlist(name: &str) -> Result<()> {
     let script = format!(
         r#"tell application "Music"
             try
@@ -246,7 +245,7 @@ pub fn delete_playlist(name: &str) -> Result<(), String> {
 }
 
 /// Get list of all user playlists in Apple Music
-pub fn list_playlists() -> Result<Vec<PlaylistInfo>, String> {
+pub fn list_playlists() -> Result<Vec<PlaylistInfo>> {
     let script = r#"tell application "Music"
         set output to ""
         repeat with p in user playlists
@@ -279,7 +278,7 @@ pub fn list_playlists() -> Result<Vec<PlaylistInfo>, String> {
 }
 
 /// Get track count in Apple Music library
-pub fn get_library_stats() -> Result<LibraryStats, String> {
+pub fn get_library_stats() -> Result<LibraryStats> {
     let script = r#"tell application "Music"
         set trackCount to count of tracks of library playlist 1
         set totalTime to 0
@@ -305,7 +304,7 @@ pub struct PlaybackStatus {
     pub track: Option<String>,
     pub artist: Option<String>,
     pub album: Option<String>,
-    pub state: String, // "playing", "paused", "stopped"
+    pub state: String,
     pub position_secs: f64,
     pub duration_secs: f64,
 }
@@ -327,34 +326,30 @@ fn escape_applescript(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-fn run_osascript(script: &str) -> Result<(), String> {
+fn run_osascript(script: &str) -> Result<()> {
     let output = Command::new("osascript")
         .arg("-e")
         .arg(script)
-        .output()
-        .map_err(|e| format!("Failed to run osascript: {e}"))?;
+        .output()?;
 
     if output.status.success() {
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let stderr = stderr.trim();
-        Err(format!("AppleScript error: {stderr}"))
+        Err(MuError::AppleScript(stderr.trim().to_string()))
     }
 }
 
-fn run_osascript_output(script: &str) -> Result<String, String> {
+fn run_osascript_output(script: &str) -> Result<String> {
     let output = Command::new("osascript")
         .arg("-e")
         .arg(script)
-        .output()
-        .map_err(|e| format!("Failed to run osascript: {e}"))?;
+        .output()?;
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let stderr = stderr.trim();
-        Err(format!("AppleScript error: {stderr}"))
+        Err(MuError::AppleScript(stderr.trim().to_string()))
     }
 }

@@ -1,5 +1,8 @@
-use rusqlite::{Connection, Result};
+use rusqlite::{params, Connection, Result};
 use std::path::Path;
+
+/// Track row from database: (id, title, artist, album, `file_path`)
+pub type TrackRow = (i64, String, Option<String>, Option<String>, String);
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
@@ -74,6 +77,11 @@ fn migrate(conn: &Connection) -> Result<()> {
         ",
     )?;
 
+    // Unique index on source_url to prevent duplicate downloads
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_tracks_source_url ON tracks(source_url) WHERE source_url IS NOT NULL;",
+    )?;
+
     Ok(())
 }
 
@@ -85,4 +93,131 @@ pub fn data_dir() -> std::path::PathBuf {
     std::fs::create_dir_all(dir.join("tracks")).ok();
     std::fs::create_dir_all(dir.join("artwork")).ok();
     dir
+}
+
+pub fn find_track_by_url(conn: &Connection, url: &str) -> Option<(i64, String)> {
+    conn.query_row(
+        "SELECT id, title FROM tracks WHERE source_url = ?1",
+        params![url],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .ok()
+}
+
+// --- Track & playlist resolution helpers ---
+
+pub fn resolve_track(conn: &Connection, track: &str) -> Option<(i64, String, Option<String>)> {
+    track
+        .parse::<i64>()
+        .ok()
+        .and_then(|id| {
+            conn.query_row(
+                "SELECT id, title, file_path FROM tracks WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .ok()
+        })
+        .or_else(|| {
+            conn.query_row(
+                "SELECT id, title, file_path FROM tracks WHERE title LIKE '%' || ?1 || '%' LIMIT 1",
+                params![track],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .ok()
+        })
+}
+
+pub fn resolve_track_for_remove(
+    conn: &Connection,
+    track: &str,
+) -> Option<(i64, String, Option<String>)> {
+    track
+        .parse::<i64>()
+        .ok()
+        .and_then(|id| {
+            conn.query_row(
+                "SELECT id, file_path, artwork_path FROM tracks WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .ok()
+        })
+        .or_else(|| {
+            conn.query_row(
+                "SELECT id, file_path, artwork_path FROM tracks WHERE title LIKE '%' || ?1 || '%' LIMIT 1",
+                params![track],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .ok()
+        })
+}
+
+pub fn resolve_track_id(conn: &Connection, track: &str) -> Option<i64> {
+    track.parse::<i64>().ok().or_else(|| {
+        conn.query_row(
+            "SELECT id FROM tracks WHERE title LIKE '%' || ?1 || '%' LIMIT 1",
+            params![track],
+            |row| row.get(0),
+        )
+        .ok()
+    })
+}
+
+pub fn resolve_playlist_id(conn: &Connection, name: &str) -> Option<i64> {
+    conn.query_row(
+        "SELECT id FROM playlists WHERE name = ?1",
+        params![name],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
+pub fn next_playlist_position(conn: &Connection, playlist_id: i64) -> i64 {
+    conn.query_row(
+        "SELECT COALESCE(MAX(position), 0) + 1 FROM playlist_tracks WHERE playlist_id = ?1",
+        params![playlist_id],
+        |row| row.get(0),
+    )
+    .unwrap_or(1)
+}
+
+pub fn resolve_track_row(conn: &Connection, track: &str) -> Option<TrackRow> {
+    track
+        .parse::<i64>()
+        .ok()
+        .and_then(|id| {
+            conn.query_row(
+                "SELECT id, title, artist, album, file_path FROM tracks WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .ok()
+        })
+        .or_else(|| {
+            conn.query_row(
+                "SELECT id, title, artist, album, file_path FROM tracks WHERE title LIKE '%' || ?1 || '%' LIMIT 1",
+                params![track],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .ok()
+        })
+}
+
+pub fn all_track_rows(conn: &Connection) -> crate::error::Result<Vec<TrackRow>> {
+    let mut stmt =
+        conn.prepare("SELECT id, title, artist, album, file_path FROM tracks ORDER BY id")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })?
+        .filter_map(Result::ok)
+        .collect();
+    Ok(rows)
 }
