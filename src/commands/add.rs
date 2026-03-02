@@ -16,11 +16,12 @@ pub fn handle_add(db_path: &Path, query: &str, playlist: Option<String>) -> Resu
     ) {
         Ok(import) => {
             if let Some(ref pid) = import.persistent_id {
-                conn.execute(
+                if let Err(e) = conn.execute(
                     "UPDATE tracks SET apple_music_id = ?1 WHERE id = ?2",
                     params![pid, result.id],
-                )
-                .ok();
+                ) {
+                    eprintln!("Warning: failed to save apple_music_id: {e}");
+                }
             }
             import.persistent_id
         }
@@ -33,16 +34,19 @@ pub fn handle_add(db_path: &Path, query: &str, playlist: Option<String>) -> Resu
     if let Some(pl_name) = playlist {
         if let Some(pl_id) = db::resolve_playlist_id(&conn, &pl_name) {
             let pos = db::next_playlist_position(&conn, pl_id);
-            conn.execute(
+            if let Err(e) = conn.execute(
                 "INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position) VALUES (?1, ?2, ?3)",
                 params![pl_id, result.id, pos],
-            )
-            .ok();
+            ) {
+                eprintln!("Warning: failed to add track to playlist in DB: {e}");
+            }
         }
         if let Some(ref pid) = persistent_id {
-            let _ = music::add_track_to_playlist_by_id(pid, &pl_name);
-        } else {
-            let _ = music::add_track_to_playlist(&result.title, &pl_name);
+            if let Err(e) = music::add_track_to_playlist_by_id(pid, &pl_name) {
+                eprintln!("Warning: failed to add track to Apple Music playlist: {e}");
+            }
+        } else if let Err(e) = music::add_track_to_playlist(&result.title, &pl_name) {
+            eprintln!("Warning: failed to add track to Apple Music playlist: {e}");
         }
     }
 

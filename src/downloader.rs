@@ -110,7 +110,7 @@ fn run_yt_dlp(args: &[&str]) -> Result<std::process::Output> {
 
 #[allow(clippy::too_many_lines)]
 pub fn download(query: &str, conn: &Connection) -> Result<AddResult> {
-    let data_dir = db::data_dir();
+    let data_dir = db::data_dir()?;
     let tracks_dir = data_dir.join("tracks");
     let artwork_dir = data_dir.join("artwork");
 
@@ -313,7 +313,7 @@ fn download_artwork(video_id: &str, thumbnail_url: &str, artwork_dir: &Path) -> 
     let artwork_path = artwork_dir.join(format!("{video_id}.jpg"));
 
     let result = Command::new("curl")
-        .args(["-sL", "-o", artwork_path.to_str().unwrap(), thumbnail_url])
+        .args(["-sL", "-o", artwork_path.to_str()?, thumbnail_url])
         .output();
 
     match result {

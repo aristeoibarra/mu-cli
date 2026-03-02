@@ -45,7 +45,9 @@ pub fn handle_playlist_action(db_path: &std::path::Path, action: PlaylistAction)
 
 fn playlist_create(conn: &Connection, name: &str) -> Result<()> {
     conn.execute("INSERT INTO playlists (name) VALUES (?1)", params![name])?;
-    let _ = music::create_playlist(name);
+    if let Err(e) = music::create_playlist(name) {
+        eprintln!("Warning: failed to create Apple Music playlist: {e}");
+    }
     println!("{}", serde_json::json!({"ok": true, "playlist": name}));
     Ok(())
 }
@@ -62,9 +64,11 @@ fn playlist_add(conn: &Connection, playlist: &str, track: &str) -> Result<()> {
 
     // Use persistent ID if available, fallback to name matching
     if let Some(pid) = db::get_apple_music_id(conn, tid) {
-        let _ = music::add_track_to_playlist_by_id(&pid, playlist);
-    } else {
-        let _ = music::add_track_to_playlist(&title, playlist);
+        if let Err(e) = music::add_track_to_playlist_by_id(&pid, playlist) {
+            eprintln!("Warning: failed to add track to Apple Music playlist: {e}");
+        }
+    } else if let Err(e) = music::add_track_to_playlist(&title, playlist) {
+        eprintln!("Warning: failed to add track to Apple Music playlist: {e}");
     }
 
     println!(
@@ -76,7 +80,9 @@ fn playlist_add(conn: &Connection, playlist: &str, track: &str) -> Result<()> {
 
 fn playlist_remove(conn: &Connection, name: &str) -> Result<()> {
     conn.execute("DELETE FROM playlists WHERE name = ?1", params![name])?;
-    let _ = music::delete_playlist(name);
+    if let Err(e) = music::delete_playlist(name) {
+        eprintln!("Warning: failed to delete Apple Music playlist: {e}");
+    }
     println!("{}", serde_json::json!({"ok": true, "removed": name}));
     Ok(())
 }
@@ -87,7 +93,9 @@ fn playlist_remove_track(conn: &Connection, playlist: &str, track: &str) -> Resu
 
     // Remove from Apple Music playlist
     if let Some(pid) = db::get_apple_music_id(conn, tid) {
-        let _ = music::remove_track_from_playlist(&pid, playlist);
+        if let Err(e) = music::remove_track_from_playlist(&pid, playlist) {
+            eprintln!("Warning: failed to remove track from Apple Music playlist: {e}");
+        }
     }
 
     conn.execute(

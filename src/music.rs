@@ -410,6 +410,40 @@ pub struct LibraryStats {
     pub total_duration_secs: f64,
 }
 
+/// Set the favorited property on a track by persistent ID
+pub fn set_track_loved(persistent_id: &str, loved: bool) -> Result<()> {
+    let loved_str = if loved { "true" } else { "false" };
+    let script = format!(
+        r#"tell application "Music"
+            set theTrack to first track of library playlist 1 whose persistent ID is "{persistent_id}"
+            set favorited of theTrack to {loved_str}
+        end tell"#
+    );
+
+    run_osascript(&script)
+}
+
+/// Get persistent IDs of all favorited tracks in Apple Music library
+pub fn get_loved_track_ids() -> Result<Vec<String>> {
+    let script = r#"tell application "Music"
+        set output to ""
+        repeat with t in (every track of library playlist 1 whose favorited is true)
+            set output to output & (persistent ID of t) & "§"
+        end repeat
+        return output
+    end tell"#;
+
+    let output = run_osascript_output(script)?;
+    let ids: Vec<String> = output
+        .trim()
+        .split('§')
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .collect();
+
+    Ok(ids)
+}
+
 /// Escape special characters for `AppleScript` strings
 fn escape_applescript(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")

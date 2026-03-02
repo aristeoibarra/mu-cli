@@ -22,6 +22,7 @@ mu playlist sync → syncs local playlists to Apple Music
   - `playback.rs` — play, pause, resume, next, previous, stop.
   - `library.rs` — list, remove, status, info, migrate, reimport.
   - `playlist.rs` — CRUD + sync. Defines `PlaylistAction` subcommand enum.
+  - `favorites.rs` — toggle, sync, list favorites. Defines `FavAction` subcommand enum.
 - **music.rs** — Apple Music integration via osascript (import, play, pause, status, playlists, delete tracks, sync).
 - **db.rs** — SQLite with WAL mode, foreign keys, auto-migration on open. Track/playlist resolution helpers. Stores Apple Music persistent IDs for reliable sync.
 - **downloader.rs** — wraps `yt-dlp` as subprocess. Downloads M4A/AAC with embedded thumbnails. Fetches high-quality artwork from iTunes Search API (falls back to YouTube thumbnail). Parses artist/album from video metadata. Updates metadata + embeds artwork via `ffmpeg`.
@@ -59,7 +60,7 @@ artwork/       thumbnail images (jpg)
 ```
 
 Schema:
-- **tracks(id, title, artist, album, duration_secs, file_path, artwork_path, source_url, added_at, apple_music_id)**
+- **tracks(id, title, artist, album, duration_secs, file_path, artwork_path, source_url, added_at, apple_music_id, favorite)**
 - **playlists(id, name)**
 - **playlist_tracks(playlist_id, track_id, position)**
 
@@ -96,6 +97,11 @@ mu playlist remove <name>
 mu playlist list
 mu playlist sync                       # sync local playlists to Apple Music
 
+# Favorites
+mu fav toggle <track_id|title>         # toggle favorite (DB + Apple Music loved)
+mu fav sync                            # pull favorites from Apple Music → DB
+mu fav list                            # list favorite tracks
+
 # Library
 mu remove <track_id|title>             # delete track from DB + disk
 
@@ -117,6 +123,8 @@ SQLite is the source of truth. Apple Music is kept in sync via persistent IDs:
 - **`mu playlist remove`** — deletes playlist from Apple Music + DB
 - **`mu playlist sync`** — bidirectional: adds missing tracks, removes extras from Apple Music playlists
 - **`mu reimport`** / **`mu migrate`** — backfills persistent IDs for existing tracks
+- **`mu fav toggle`** — toggles `favorite` in DB + sets `loved` property in Apple Music (via persistent ID)
+- **`mu fav sync`** — pulls `loved` status from Apple Music → updates `favorite` column in DB
 
 ## Adding Features
 

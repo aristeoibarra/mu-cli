@@ -4,6 +4,7 @@ mod downloader;
 mod error;
 mod music;
 
+use crate::commands::favorites::FavAction;
 use crate::commands::playlist::PlaylistAction;
 use clap::{Parser, Subcommand};
 use error::json_error;
@@ -76,11 +77,22 @@ enum Commands {
         /// Track ID or title substring (all if omitted)
         track: Option<String>,
     },
+    /// Manage favorites
+    Fav {
+        #[command(subcommand)]
+        action: FavAction,
+    },
 }
 
 fn main() {
     let cli = Cli::parse();
-    let data_dir = db::data_dir();
+    let data_dir = match db::data_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            println!("{}", json_error(&e.to_string()));
+            std::process::exit(1);
+        }
+    };
     let db_path = data_dir.join("mu.db");
 
     let result = match cli.command {
@@ -93,13 +105,14 @@ fn main() {
         Commands::Next => commands::handle_next(),
         Commands::Previous => commands::handle_previous(),
         Commands::Stop => commands::handle_stop(),
-        Commands::Status => commands::handle_status(),
+        Commands::Status => commands::handle_status(&db_path),
         Commands::List { playlist } => commands::handle_list(&db_path, playlist.as_deref()),
         Commands::Playlist { action } => commands::handle_playlist_action(&db_path, action),
         Commands::Remove { track } => commands::handle_remove(&db_path, &track),
         Commands::Migrate { dry_run } => commands::handle_migrate(&db_path, dry_run),
         Commands::Info => commands::handle_info(),
         Commands::Reimport { track } => commands::handle_reimport(&db_path, track.as_deref()),
+        Commands::Fav { action } => commands::handle_fav_action(&db_path, action),
     };
 
     if let Err(e) = result {

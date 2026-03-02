@@ -3,8 +3,21 @@ use crate::{db, music};
 use rusqlite::params;
 use std::path::Path;
 
-pub fn handle_status() -> Result<()> {
+pub fn handle_status(db_path: &Path) -> Result<()> {
     let status = music::get_status()?;
+    let favorite = status
+        .track
+        .as_ref()
+        .and_then(|track_name| {
+            let conn = db::open(db_path).ok()?;
+            conn.query_row(
+                "SELECT COALESCE(favorite, 0) FROM tracks WHERE title LIKE '%' || ?1 || '%' LIMIT 1",
+                params![track_name],
+                |row| row.get::<_, bool>(0),
+            )
+            .ok()
+        })
+        .unwrap_or(false);
     println!(
         "{}",
         serde_json::json!({
@@ -14,6 +27,7 @@ pub fn handle_status() -> Result<()> {
             "state": status.state,
             "position_secs": status.position_secs,
             "duration_secs": status.duration_secs,
+            "favorite": favorite,
         })
     );
     Ok(())
@@ -23,7 +37,7 @@ pub fn handle_list(db_path: &Path, playlist: Option<&str>) -> Result<()> {
     let conn = db::open(db_path)?;
     if let Some(pl_name) = playlist {
         let mut stmt = conn.prepare(
-            "SELECT t.id, t.title, t.artist, t.album, t.duration_secs, t.artwork_path FROM tracks t
+            "SELECT t.id, t.title, t.artist, t.album, t.duration_secs, t.artwork_path, COALESCE(t.favorite, 0) FROM tracks t
              JOIN playlist_tracks pt ON pt.track_id = t.id
              JOIN playlists p ON p.id = pt.playlist_id
              WHERE p.name = ?1
@@ -38,6 +52,7 @@ pub fn handle_list(db_path: &Path, playlist: Option<&str>) -> Result<()> {
                     "album": row.get::<_, Option<String>>(3)?,
                     "duration": row.get::<_, Option<i64>>(4)?,
                     "artwork": row.get::<_, Option<String>>(5)?,
+                    "favorite": row.get::<_, bool>(6)?,
                 }))
             })?
             .filter_map(std::result::Result::ok)
@@ -48,7 +63,7 @@ pub fn handle_list(db_path: &Path, playlist: Option<&str>) -> Result<()> {
         );
     } else {
         let mut stmt = conn.prepare(
-            "SELECT id, title, artist, album, duration_secs, artwork_path FROM tracks ORDER BY id",
+            "SELECT id, title, artist, album, duration_secs, artwork_path, COALESCE(favorite, 0) FROM tracks ORDER BY id",
         )?;
         let rows: Vec<serde_json::Value> = stmt
             .query_map([], |row| {
@@ -59,6 +74,7 @@ pub fn handle_list(db_path: &Path, playlist: Option<&str>) -> Result<()> {
                     "album": row.get::<_, Option<String>>(3)?,
                     "duration": row.get::<_, Option<i64>>(4)?,
                     "artwork": row.get::<_, Option<String>>(5)?,
+                    "favorite": row.get::<_, bool>(6)?,
                 }))
             })?
             .filter_map(std::result::Result::ok)
@@ -75,9 +91,11 @@ pub fn handle_remove(db_path: &Path, track: &str) -> Result<()> {
 
     // Remove from Apple Music (by persistent ID, fallback to file path)
     if let Some(ref pid) = apple_music_id {
-        let _ = music::delete_track(pid);
-    } else {
-        let _ = music::delete_track_by_path(&file_path);
+        if let Err(e) = music::delete_track(pid) {
+            eprintln!("Warning: failed to remove from Apple Music: {e}");
+        }
+    } else if let Err(e) = music::delete_track_by_path(&file_path) {
+        eprintln!("Warning: failed to remove from Apple Music: {e}");
     }
 
     conn.execute(
@@ -174,11 +192,12 @@ pub fn handle_reimport(db_path: &Path, track: Option<&str>) -> Result<()> {
         {
             Ok(import) => {
                 if let Some(ref pid) = import.persistent_id {
-                    conn.execute(
+                    if let Err(e) = conn.execute(
                         "UPDATE tracks SET apple_music_id = ?1 WHERE id = ?2",
                         params![pid, id],
-                    )
-                    .ok();
+                    ) {
+                        eprintln!("Warning: failed to save apple_music_id for '{title}': {e}");
+                    }
                 }
                 reimported += 1;
                 eprintln!("Reimported: {title} by {artist:?}");
@@ -220,11 +239,12 @@ fn import_tracks(conn: &rusqlite::Connection, tracks: &[db::TrackRow]) -> (i64, 
         {
             Ok(import) => {
                 if let Some(ref pid) = import.persistent_id {
-                    conn.execute(
+                    if let Err(e) = conn.execute(
                         "UPDATE tracks SET apple_music_id = ?1 WHERE id = ?2",
                         params![pid, id],
-                    )
-                    .ok();
+                    ) {
+                        eprintln!("Warning: failed to save apple_music_id for '{title}': {e}");
+                    }
                 }
                 imported += 1;
                 eprintln!("Imported: {title}");

@@ -82,6 +82,23 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute("ALTER TABLE tracks ADD COLUMN apple_music_id TEXT", [])?;
     }
 
+    // Add favorite column if it doesn't exist (migration)
+    let has_favorite: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('tracks') WHERE name='favorite'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|c| c > 0)
+        .unwrap_or(false);
+
+    if !has_favorite {
+        conn.execute(
+            "ALTER TABLE tracks ADD COLUMN favorite BOOLEAN DEFAULT 0",
+            [],
+        )?;
+    }
+
     // Drop old podcast tables if they exist
     conn.execute_batch(
         "
@@ -99,14 +116,20 @@ fn migrate(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub fn data_dir() -> std::path::PathBuf {
-    let dir = dirs::data_local_dir()
-        .unwrap_or_else(|| dirs::home_dir().unwrap().join(".local/share"))
+pub fn data_dir() -> crate::error::Result<std::path::PathBuf> {
+    let base = dirs::data_local_dir().or_else(|| dirs::home_dir().map(|h| h.join(".local/share")));
+    let dir = base
+        .ok_or_else(|| {
+            crate::error::MuError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "could not determine data directory",
+            ))
+        })?
         .join("mu");
-    std::fs::create_dir_all(&dir).ok();
-    std::fs::create_dir_all(dir.join("tracks")).ok();
-    std::fs::create_dir_all(dir.join("artwork")).ok();
-    dir
+    std::fs::create_dir_all(&dir)?;
+    std::fs::create_dir_all(dir.join("tracks"))?;
+    std::fs::create_dir_all(dir.join("artwork"))?;
+    Ok(dir)
 }
 
 pub fn find_track_by_url(conn: &Connection, url: &str) -> Option<(i64, String)> {
