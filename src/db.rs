@@ -28,7 +28,8 @@ fn migrate(conn: &Connection) -> Result<()> {
                 source_url TEXT,
                 added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 apple_music_id TEXT,
-                favorite BOOLEAN DEFAULT 0
+                favorite BOOLEAN DEFAULT 0,
+                play_count INTEGER DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS playlists (
@@ -77,6 +78,22 @@ fn migrate(conn: &Connection) -> Result<()> {
         if !has_favorite {
             conn.execute(
                 "ALTER TABLE tracks ADD COLUMN favorite BOOLEAN DEFAULT 0",
+                [],
+            )?;
+        }
+
+        // play_count column with default
+        let has_play_count: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('tracks') WHERE name='play_count'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if !has_play_count {
+            conn.execute(
+                "ALTER TABLE tracks ADD COLUMN play_count INTEGER DEFAULT 0",
                 [],
             )?;
         }

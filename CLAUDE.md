@@ -23,6 +23,7 @@ mu playlist sync → syncs local playlists to Apple Music
   - `library.rs` — list, remove, status, info, migrate, reimport.
   - `playlist.rs` — CRUD + sync. Defines `PlaylistAction` subcommand enum.
   - `favorites.rs` — toggle, sync, list favorites. Defines `FavAction` subcommand enum.
+  - `plays.rs` — sync and list play counts. Defines `PlaysAction` subcommand enum.
 - **music.rs** — Apple Music integration via osascript (import, play, pause, status, playlists, delete tracks, sync).
 - **db.rs** — SQLite with WAL mode, foreign keys, auto-migration on open. Track/playlist resolution helpers. Stores Apple Music persistent IDs for reliable sync.
 - **downloader.rs** — wraps `yt-dlp` as subprocess. Downloads M4A/AAC with embedded thumbnails. Fetches high-quality artwork from iTunes Search API (falls back to YouTube thumbnail). Parses artist/album from video metadata. Updates metadata + embeds artwork via `ffmpeg`.
@@ -60,7 +61,7 @@ artwork/       thumbnail images (jpg)
 ```
 
 Schema:
-- **tracks(id, title, artist, album, duration_secs, file_path, artwork_path, source_url, added_at, apple_music_id, favorite)**
+- **tracks(id, title, artist, album, duration_secs, file_path, artwork_path, source_url, added_at, apple_music_id, favorite, play_count)**
 - **playlists(id, name)**
 - **playlist_tracks(playlist_id, track_id, position)**
 
@@ -102,6 +103,10 @@ mu fav toggle <track_id|title>         # toggle favorite (DB + Apple Music loved
 mu fav sync                            # pull favorites from Apple Music → DB
 mu fav list                            # list favorite tracks
 
+# Play Counts
+mu plays sync                          # pull play counts from Apple Music → DB
+mu plays list                          # list tracks by play count (descending)
+
 # Library
 mu remove <track_id|title>             # delete track from DB + disk
 
@@ -125,6 +130,7 @@ SQLite is the source of truth. Apple Music is kept in sync via persistent IDs:
 - **`mu reimport`** / **`mu migrate`** — backfills persistent IDs for existing tracks
 - **`mu fav toggle`** — toggles `favorite` in DB + sets `loved` property in Apple Music (via persistent ID)
 - **`mu fav sync`** — pulls `loved` status from Apple Music → updates `favorite` column in DB
+- **`mu plays sync`** — pulls `played count` from Apple Music → updates `play_count` column in DB
 
 ## Adding Features
 

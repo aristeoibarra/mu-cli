@@ -228,9 +228,6 @@ pub fn download(query: &str, conn: &Connection) -> Result<AddResult> {
 
     let file_path = String::from_utf8_lossy(&dl.stdout).trim().to_string();
 
-    // Fix permissions so Apple Music can read the file
-    set_readable_permissions(&file_path);
-
     // Try iTunes artwork first, fall back to YouTube thumbnail
     let artwork_path =
         fetch_itunes_artwork(artist.as_deref(), &title, &artwork_dir, &video_id)
@@ -244,6 +241,9 @@ pub fn download(query: &str, conn: &Connection) -> Result<AddResult> {
         album.as_deref(),
         artwork_path.as_deref(),
     );
+
+    // Fix permissions AFTER metadata update (ffmpeg replaces the file)
+    set_readable_permissions(&file_path);
 
     // Insert into database
     conn.execute(

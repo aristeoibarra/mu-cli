@@ -5,6 +5,7 @@ mod error;
 mod music;
 
 use crate::commands::favorites::FavAction;
+use crate::commands::plays::PlaysAction;
 use crate::commands::playlist::PlaylistAction;
 use clap::{Parser, Subcommand};
 use error::json_error;
@@ -82,6 +83,11 @@ enum Commands {
         #[command(subcommand)]
         action: FavAction,
     },
+    /// View play counts
+    Plays {
+        #[command(subcommand)]
+        action: PlaysAction,
+    },
 }
 
 fn main() {
@@ -113,6 +119,7 @@ fn main() {
         Commands::Info => commands::handle_info(),
         Commands::Reimport { track } => commands::handle_reimport(&db_path, track.as_deref()),
         Commands::Fav { action } => commands::handle_fav_action(&db_path, action),
+        Commands::Plays { action } => commands::handle_plays_action(&db_path, action),
     };
 
     if let Err(e) = result {

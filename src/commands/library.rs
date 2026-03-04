@@ -5,27 +5,26 @@ use std::path::Path;
 
 pub fn handle_status(db_path: &Path) -> Result<()> {
     let status = music::get_status()?;
-    let favorite = status
+    let (favorite, play_count) = status
         .track
         .as_ref()
         .and_then(|track_name| {
             let conn = db::open(db_path).ok()?;
-            // Try exact match first, fallback to LIKE
             conn.query_row(
-                "SELECT COALESCE(favorite, 0) FROM tracks WHERE title = ?1",
+                "SELECT COALESCE(favorite, 0), COALESCE(play_count, 0) FROM tracks WHERE title = ?1",
                 params![track_name],
-                |row| row.get::<_, bool>(0),
+                |row| Ok((row.get::<_, bool>(0)?, row.get::<_, i64>(1)?)),
             )
             .or_else(|_| {
                 conn.query_row(
-                    "SELECT COALESCE(favorite, 0) FROM tracks WHERE title LIKE '%' || ?1 || '%' LIMIT 1",
+                    "SELECT COALESCE(favorite, 0), COALESCE(play_count, 0) FROM tracks WHERE title LIKE '%' || ?1 || '%' LIMIT 1",
                     params![track_name],
-                    |row| row.get::<_, bool>(0),
+                    |row| Ok((row.get::<_, bool>(0)?, row.get::<_, i64>(1)?)),
                 )
             })
             .ok()
         })
-        .unwrap_or(false);
+        .unwrap_or((false, 0));
     println!(
         "{}",
         serde_json::json!({
@@ -36,6 +35,7 @@ pub fn handle_status(db_path: &Path) -> Result<()> {
             "position_secs": status.position_secs,
             "duration_secs": status.duration_secs,
             "favorite": favorite,
+            "play_count": play_count,
         })
     );
     Ok(())
@@ -45,7 +45,7 @@ pub fn handle_list(db_path: &Path, playlist: Option<&str>) -> Result<()> {
     let conn = db::open(db_path)?;
     if let Some(pl_name) = playlist {
         let mut stmt = conn.prepare(
-            "SELECT t.id, t.title, t.artist, t.album, t.duration_secs, t.artwork_path, COALESCE(t.favorite, 0) FROM tracks t
+            "SELECT t.id, t.title, t.artist, t.album, t.duration_secs, t.artwork_path, COALESCE(t.favorite, 0), COALESCE(t.play_count, 0) FROM tracks t
              JOIN playlist_tracks pt ON pt.track_id = t.id
              JOIN playlists p ON p.id = pt.playlist_id
              WHERE p.name = ?1
@@ -61,6 +61,7 @@ pub fn handle_list(db_path: &Path, playlist: Option<&str>) -> Result<()> {
                     "duration": row.get::<_, Option<i64>>(4)?,
                     "artwork": row.get::<_, Option<String>>(5)?,
                     "favorite": row.get::<_, bool>(6)?,
+                    "play_count": row.get::<_, i64>(7)?,
                 }))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -70,7 +71,7 @@ pub fn handle_list(db_path: &Path, playlist: Option<&str>) -> Result<()> {
         );
     } else {
         let mut stmt = conn.prepare(
-            "SELECT id, title, artist, album, duration_secs, artwork_path, COALESCE(favorite, 0) FROM tracks ORDER BY id",
+            "SELECT id, title, artist, album, duration_secs, artwork_path, COALESCE(favorite, 0), COALESCE(play_count, 0) FROM tracks ORDER BY id",
         )?;
         let rows: Vec<serde_json::Value> = stmt
             .query_map([], |row| {
@@ -82,6 +83,7 @@ pub fn handle_list(db_path: &Path, playlist: Option<&str>) -> Result<()> {
                     "duration": row.get::<_, Option<i64>>(4)?,
                     "artwork": row.get::<_, Option<String>>(5)?,
                     "favorite": row.get::<_, bool>(6)?,
+                    "play_count": row.get::<_, i64>(7)?,
                 }))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;

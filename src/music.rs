@@ -470,6 +470,40 @@ pub fn get_loved_track_ids() -> Result<Vec<String>> {
     Ok(ids)
 }
 
+/// Get play counts for all tracks in Apple Music library
+pub fn get_play_counts() -> Result<Vec<(String, i64)>> {
+    let fs = FIELD_SEP;
+    let rs = RECORD_SEP;
+    let script = format!(
+        r#"tell application "Music"
+        set output to ""
+        repeat with t in (every track of library playlist 1)
+            set pid to persistent ID of t
+            set pc to played count of t
+            set output to output & pid & "{fs}" & pc & "{rs}"
+        end repeat
+        return output
+    end tell"#
+    );
+
+    let output = run_osascript_output(&script)?;
+    let results: Vec<(String, i64)> = output
+        .trim()
+        .split(RECORD_SEP)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| {
+            let parts: Vec<&str> = s.split(FIELD_SEP).collect();
+            if parts.len() >= 2 {
+                Some((parts[0].to_string(), parts[1].parse().unwrap_or(0)))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    Ok(results)
+}
+
 /// Escape special characters for `AppleScript` strings
 pub fn escape_applescript(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
