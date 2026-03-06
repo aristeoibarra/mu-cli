@@ -228,6 +228,13 @@ fn import_tracks_inner(
             continue;
         }
 
+        // Delete old Apple Music track before re-importing to avoid duplicates
+        if !check_existing {
+            if let Some(old_pid) = db::get_apple_music_id(conn, *id) {
+                let _ = music::delete_track(&old_pid);
+            }
+        }
+
         let mut last_err = None;
         let mut success = false;
         for attempt in 0..4 {
