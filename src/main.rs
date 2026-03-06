@@ -73,6 +73,8 @@ enum Commands {
     },
     /// Show Apple Music library info
     Info,
+    /// Sync favorites and play counts from Apple Music
+    Sync,
     /// Re-import track with updated metadata
     Reimport {
         /// Track ID or title substring (all if omitted)
@@ -117,6 +119,7 @@ fn main() {
         Commands::Remove { track } => commands::handle_remove(&db_path, &track),
         Commands::Migrate { dry_run } => commands::handle_migrate(&db_path, dry_run),
         Commands::Info => commands::handle_info(),
+        Commands::Sync => commands::handle_sync(&db_path),
         Commands::Reimport { track } => commands::handle_reimport(&db_path, track.as_deref()),
         Commands::Fav { action } => commands::handle_fav_action(&db_path, action),
         Commands::Plays { action } => commands::handle_plays_action(&db_path, action),

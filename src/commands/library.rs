@@ -228,24 +228,109 @@ fn import_tracks_inner(
             continue;
         }
 
-        match music::import_with_metadata(path, artist.as_deref(), album.as_deref()) {
-            Ok(import) => {
-                if let Some(ref pid) = import.persistent_id {
-                    if let Err(e) = conn.execute(
-                        "UPDATE tracks SET apple_music_id = ?1 WHERE id = ?2",
-                        params![pid, id],
-                    ) {
-                        warnings.push(format!("failed to save apple_music_id for '{title}': {e}"));
+        let mut last_err = None;
+        let mut success = false;
+        for attempt in 0..4 {
+            if attempt > 0 {
+                let delay = std::time::Duration::from_secs(1 << attempt); // 2s, 4s, 8s
+                std::thread::sleep(delay);
+            }
+            match music::import_with_metadata(path, artist.as_deref(), album.as_deref()) {
+                Ok(import) => {
+                    if let Some(ref pid) = import.persistent_id {
+                        if let Err(e) = conn.execute(
+                            "UPDATE tracks SET apple_music_id = ?1 WHERE id = ?2",
+                            params![pid, id],
+                        ) {
+                            warnings.push(format!("failed to save apple_music_id for '{title}': {e}"));
+                        }
+                    }
+                    imported += 1;
+                    success = true;
+                    break;
+                }
+                Err(e) => {
+                    let is_retryable = matches!(&e, MuError::AppleScript(msg) if msg.contains("(-54)"));
+                    last_err = Some(e);
+                    if !is_retryable {
+                        break;
                     }
                 }
-                imported += 1;
             }
-            Err(e) => {
-                failed += 1;
+        }
+        if !success {
+            failed += 1;
+            if let Some(e) = last_err {
                 warnings.push(format!("failed to import '{title}': {e}"));
             }
         }
     }
 
     (imported, skipped, failed, warnings)
+}
+
+pub fn handle_sync(db_path: &Path) -> Result<()> {
+    let conn = db::open(db_path)?;
+
+    // Sync favorites
+    let loved_ids = music::get_loved_track_ids()?;
+    let loved_set: std::collections::HashSet<&str> =
+        loved_ids.iter().map(String::as_str).collect();
+
+    let mut stmt = conn.prepare(
+        "SELECT id, apple_music_id, COALESCE(favorite, 0) FROM tracks WHERE apple_music_id IS NOT NULL",
+    )?;
+    let tracks: Vec<(i64, String, bool)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .map_err(MuError::from)?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    let mut fav_added = 0i64;
+    let mut fav_removed = 0i64;
+    for (id, apple_music_id, was_favorite) in &tracks {
+        let is_loved = loved_set.contains(apple_music_id.as_str());
+        if is_loved && !was_favorite {
+            conn.execute("UPDATE tracks SET favorite = 1 WHERE id = ?1", params![id])?;
+            fav_added += 1;
+        } else if !is_loved && *was_favorite {
+            conn.execute("UPDATE tracks SET favorite = 0 WHERE id = ?1", params![id])?;
+            fav_removed += 1;
+        }
+    }
+
+    // Sync play counts
+    let play_counts = music::get_play_counts()?;
+    let count_map: std::collections::HashMap<&str, i64> =
+        play_counts.iter().map(|(id, c)| (id.as_str(), *c)).collect();
+
+    let mut stmt = conn.prepare(
+        "SELECT id, apple_music_id FROM tracks WHERE apple_music_id IS NOT NULL",
+    )?;
+    let id_tracks: Vec<(i64, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    let mut plays_updated = 0i64;
+    for (id, apple_music_id) in &id_tracks {
+        if let Some(&count) = count_map.get(apple_music_id.as_str()) {
+            let changed = conn.execute(
+                "UPDATE tracks SET play_count = ?1 WHERE id = ?2 AND COALESCE(play_count, 0) != ?1",
+                params![count, id],
+            )?;
+            if changed > 0 {
+                plays_updated += 1;
+            }
+        }
+    }
+
+    println!(
+        "{}",
+        serde_json::json!({
+            "ok": true,
+            "favorites_added": fav_added,
+            "favorites_removed": fav_removed,
+            "plays_updated": plays_updated,
+        })
+    );
+    Ok(())
 }
