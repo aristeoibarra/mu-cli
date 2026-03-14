@@ -246,9 +246,13 @@ pub fn delete_track(persistent_id: &str) -> Result<()> {
     let escaped_id = escape_applescript(persistent_id);
     let script = format!(
         r#"tell application "Music"
-            try
-                delete (first track of library playlist 1 whose persistent ID is "{escaped_id}")
-            end try
+            set matchedTracks to (every track of library playlist 1 whose persistent ID is "{escaped_id}")
+            if (count of matchedTracks) is 0 then
+                error "no track found with persistent ID {escaped_id}"
+            end if
+            repeat with t in matchedTracks
+                delete t
+            end repeat
         end tell"#
     );
 
@@ -260,12 +264,13 @@ pub fn delete_track_by_path(path: &str) -> Result<()> {
     let escaped_path = escape_applescript(path);
     let script = format!(
         r#"tell application "Music"
-            try
-                set matchingTracks to (every track of library playlist 1 whose location is (POSIX file "{escaped_path}"))
-                repeat with t in matchingTracks
-                    delete t
-                end repeat
-            end try
+            set matchingTracks to (every track of library playlist 1 whose location is (POSIX file "{escaped_path}"))
+            if (count of matchingTracks) is 0 then
+                error "no track found with path {escaped_path}"
+            end if
+            repeat with t in matchingTracks
+                delete t
+            end repeat
         end tell"#
     );
 
