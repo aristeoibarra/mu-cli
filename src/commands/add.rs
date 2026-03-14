@@ -1,4 +1,4 @@
-use crate::error::{json_result, Result};
+use crate::error::{json_result, MuError, Result};
 use crate::{db, downloader, music};
 use rusqlite::params;
 use std::path::Path;
@@ -9,26 +9,46 @@ pub fn handle_add(db_path: &Path, query: &str, playlist: Option<String>) -> Resu
     let mut warnings = Vec::new();
 
     let file_path = Path::new(&result.file);
-    let persistent_id = match music::import_with_metadata(
-        file_path,
-        result.artist.as_deref(),
-        result.album.as_deref(),
-    ) {
-        Ok(import) => {
-            if let Some(ref pid) = import.persistent_id {
-                if let Err(e) = conn.execute(
-                    "UPDATE tracks SET apple_music_id = ?1 WHERE id = ?2",
-                    params![pid, result.id],
-                ) {
-                    warnings.push(format!("failed to save apple_music_id: {e}"));
+    let persistent_id = {
+        let mut last_err = None;
+        let mut pid = None;
+        for attempt in 0..4 {
+            if attempt > 0 {
+                let delay = std::time::Duration::from_secs(1 << attempt);
+                std::thread::sleep(delay);
+            }
+            match music::import_with_metadata(
+                file_path,
+                result.artist.as_deref(),
+                result.album.as_deref(),
+            ) {
+                Ok(import) => {
+                    if let Some(ref p) = import.persistent_id {
+                        if let Err(e) = conn.execute(
+                            "UPDATE tracks SET apple_music_id = ?1 WHERE id = ?2",
+                            params![p, result.id],
+                        ) {
+                            warnings.push(format!("failed to save apple_music_id: {e}"));
+                        }
+                    }
+                    pid = import.persistent_id;
+                    last_err = None;
+                    break;
+                }
+                Err(e) => {
+                    let is_retryable =
+                        matches!(&e, MuError::AppleScript(msg) if msg.contains("(-54)"));
+                    last_err = Some(e);
+                    if !is_retryable {
+                        break;
+                    }
                 }
             }
-            import.persistent_id
         }
-        Err(e) => {
+        if let Some(e) = last_err {
             warnings.push(format!("failed to import to Apple Music: {e}"));
-            None
         }
+        pid
     };
 
     if let Some(pl_name) = playlist {
