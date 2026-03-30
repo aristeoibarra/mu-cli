@@ -61,11 +61,9 @@ pub fn handle_add(db_path: &Path, query: &str, playlist: Option<String>) -> Resu
                 warnings.push(format!("failed to add track to playlist in DB: {e}"));
             }
         }
-        if let Err(e) = music::add_track_to_playlist_smart(
-            persistent_id.as_deref(),
-            &result.title,
-            &pl_name,
-        ) {
+        if let Err(e) =
+            music::add_track_to_playlist_smart(persistent_id.as_deref(), &result.title, &pl_name)
+        {
             warnings.push(format!("failed to add track to Apple Music playlist: {e}"));
         }
     }

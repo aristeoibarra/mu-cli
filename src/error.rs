@@ -49,7 +49,10 @@ pub fn json_result(value: serde_json::Value, warnings: &[String]) -> String {
             map.insert(
                 "warnings".to_string(),
                 serde_json::Value::Array(
-                    warnings.iter().map(|w| serde_json::Value::String(w.clone())).collect(),
+                    warnings
+                        .iter()
+                        .map(|w| serde_json::Value::String(w.clone()))
+                        .collect(),
                 ),
             );
         }

@@ -241,7 +241,15 @@ pub fn resolve_track_row(conn: &Connection, track: &str) -> Option<TrackRow> {
         if let Ok(row) = conn.query_row(
             "SELECT id, title, artist, album, file_path FROM tracks WHERE id = ?1",
             params![id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         ) {
             return Some(row);
         }

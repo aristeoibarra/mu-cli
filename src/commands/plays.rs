@@ -22,12 +22,13 @@ pub fn handle_plays_action(db_path: &Path, action: PlaysAction) -> Result<()> {
 
 fn plays_sync(conn: &rusqlite::Connection) -> Result<()> {
     let play_counts = music::get_play_counts()?;
-    let count_map: std::collections::HashMap<&str, i64> =
-        play_counts.iter().map(|(id, c)| (id.as_str(), *c)).collect();
+    let count_map: std::collections::HashMap<&str, i64> = play_counts
+        .iter()
+        .map(|(id, c)| (id.as_str(), *c))
+        .collect();
 
-    let mut stmt = conn.prepare(
-        "SELECT id, apple_music_id FROM tracks WHERE apple_music_id IS NOT NULL",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT id, apple_music_id FROM tracks WHERE apple_music_id IS NOT NULL")?;
     let tracks: Vec<(i64, String)> = stmt
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<std::result::Result<Vec<_>, _>>()?;

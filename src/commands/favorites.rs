@@ -61,8 +61,7 @@ fn fav_toggle(conn: &rusqlite::Connection, track: &str) -> Result<()> {
 
 fn fav_sync(conn: &rusqlite::Connection) -> Result<()> {
     let loved_ids = music::get_loved_track_ids()?;
-    let loved_set: std::collections::HashSet<&str> =
-        loved_ids.iter().map(String::as_str).collect();
+    let loved_set: std::collections::HashSet<&str> = loved_ids.iter().map(String::as_str).collect();
 
     // Get all tracks with apple_music_id
     let mut stmt = conn.prepare(
@@ -79,16 +78,10 @@ fn fav_sync(conn: &rusqlite::Connection) -> Result<()> {
     for (id, apple_music_id, was_favorite) in &tracks {
         let is_loved = loved_set.contains(apple_music_id.as_str());
         if is_loved && !was_favorite {
-            conn.execute(
-                "UPDATE tracks SET favorite = 1 WHERE id = ?1",
-                params![id],
-            )?;
+            conn.execute("UPDATE tracks SET favorite = 1 WHERE id = ?1", params![id])?;
             added += 1;
         } else if !is_loved && *was_favorite {
-            conn.execute(
-                "UPDATE tracks SET favorite = 0 WHERE id = ?1",
-                params![id],
-            )?;
+            conn.execute("UPDATE tracks SET favorite = 0 WHERE id = ?1", params![id])?;
             removed += 1;
         }
     }

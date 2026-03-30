@@ -97,16 +97,13 @@ fn parse_album(title: &str, artist: Option<&str>) -> Option<String> {
 }
 
 fn run_yt_dlp(args: &[&str]) -> Result<std::process::Output> {
-    Command::new("yt-dlp")
-        .args(args)
-        .output()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                MuError::ExternalTool("yt-dlp not found. Install with: brew install yt-dlp".into())
-            } else {
-                MuError::ExternalTool(format!("failed to run yt-dlp: {e}"))
-            }
-        })
+    Command::new("yt-dlp").args(args).output().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            MuError::ExternalTool("yt-dlp not found. Install with: brew install yt-dlp".into())
+        } else {
+            MuError::ExternalTool(format!("failed to run yt-dlp: {e}"))
+        }
+    })
 }
 
 /// Validate video ID: only alphanumeric, hyphens, underscores allowed.
@@ -229,9 +226,8 @@ pub fn download(query: &str, conn: &Connection) -> Result<AddResult> {
     let file_path = String::from_utf8_lossy(&dl.stdout).trim().to_string();
 
     // Try iTunes artwork first, fall back to YouTube thumbnail
-    let artwork_path =
-        fetch_itunes_artwork(artist.as_deref(), &title, &artwork_dir, &video_id)
-            .or_else(|| download_artwork(&video_id, &thumbnail_url, &artwork_dir));
+    let artwork_path = fetch_itunes_artwork(artist.as_deref(), &title, &artwork_dir, &video_id)
+        .or_else(|| download_artwork(&video_id, &thumbnail_url, &artwork_dir));
 
     // Update metadata and embed artwork if available
     update_metadata(
@@ -287,10 +283,7 @@ fn fetch_itunes_artwork(
         urlencode(&search_term)
     );
 
-    let result = Command::new("curl")
-        .args(["-sL", &url])
-        .output()
-        .ok()?;
+    let result = Command::new("curl").args(["-sL", &url]).output().ok()?;
 
     if !result.status.success() {
         return None;
@@ -398,14 +391,16 @@ mod tests {
 
     #[test]
     fn parse_artist_title_with_dash() {
-        let (title, artist) = parse_artist_title("Radiohead - Creep (Official Video)", "RadioheadVEVO");
+        let (title, artist) =
+            parse_artist_title("Radiohead - Creep (Official Video)", "RadioheadVEVO");
         assert_eq!(title, "Creep");
         assert_eq!(artist, Some("Radiohead".to_string()));
     }
 
     #[test]
     fn parse_artist_title_with_en_dash() {
-        let (title, artist) = parse_artist_title("Daft Punk \u{2013} Something About Us", "Daft Punk");
+        let (title, artist) =
+            parse_artist_title("Daft Punk \u{2013} Something About Us", "Daft Punk");
         assert_eq!(title, "Something About Us");
         assert_eq!(artist, Some("Daft Punk".to_string()));
     }

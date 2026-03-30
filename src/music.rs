@@ -515,10 +515,7 @@ pub fn escape_applescript(s: &str) -> String {
 }
 
 fn run_osascript(script: &str) -> Result<()> {
-    let output = Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .output()?;
+    let output = Command::new("osascript").arg("-e").arg(script).output()?;
 
     if output.status.success() {
         Ok(())
@@ -529,10 +526,7 @@ fn run_osascript(script: &str) -> Result<()> {
 }
 
 fn run_osascript_output(script: &str) -> Result<String> {
-    let output = Command::new("osascript")
-        .arg("-e")
-        .arg(script)
-        .output()?;
+    let output = Command::new("osascript").arg("-e").arg(script).output()?;
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -558,10 +552,7 @@ mod tests {
 
     #[test]
     fn escape_applescript_combined() {
-        assert_eq!(
-            escape_applescript(r#"a\"b"#),
-            r#"a\\\"b"#
-        );
+        assert_eq!(escape_applescript(r#"a\"b"#), r#"a\\\"b"#);
     }
 
     #[test]

@@ -71,10 +71,7 @@ fn playlist_create(conn: &Connection, name: &str) -> Result<()> {
     }
     println!(
         "{}",
-        json_result(
-            serde_json::json!({"ok": true, "playlist": name}),
-            &warnings,
-        )
+        json_result(serde_json::json!({"ok": true, "playlist": name}), &warnings,)
     );
     Ok(())
 }
@@ -120,10 +117,7 @@ fn playlist_remove(conn: &Connection, name: &str) -> Result<()> {
     }
     println!(
         "{}",
-        json_result(
-            serde_json::json!({"ok": true, "removed": name}),
-            &warnings,
-        )
+        json_result(serde_json::json!({"ok": true, "removed": name}), &warnings,)
     );
     Ok(())
 }
@@ -250,8 +244,7 @@ fn playlist_sync(conn: &Connection) -> Result<()> {
 
         // Remove extra tracks and duplicates from Apple Music playlist
         if let Ok(am_ids) = music::get_playlist_track_ids(playlist_name) {
-            let mut seen: std::collections::HashMap<&str, usize> =
-                std::collections::HashMap::new();
+            let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
             for am_id in &am_ids {
                 let count = seen.entry(am_id).or_insert(0);
                 *count += 1;

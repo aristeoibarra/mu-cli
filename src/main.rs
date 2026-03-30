@@ -5,8 +5,8 @@ mod error;
 mod music;
 
 use crate::commands::favorites::FavAction;
-use crate::commands::plays::PlaysAction;
 use crate::commands::playlist::PlaylistAction;
+use crate::commands::plays::PlaysAction;
 use clap::{Parser, Subcommand};
 use error::json_error;
 

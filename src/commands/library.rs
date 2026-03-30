@@ -249,7 +249,8 @@ fn import_tracks_inner(
                             "UPDATE tracks SET apple_music_id = ?1 WHERE id = ?2",
                             params![pid, id],
                         ) {
-                            warnings.push(format!("failed to save apple_music_id for '{title}': {e}"));
+                            warnings
+                                .push(format!("failed to save apple_music_id for '{title}': {e}"));
                         }
                     }
                     imported += 1;
@@ -257,7 +258,8 @@ fn import_tracks_inner(
                     break;
                 }
                 Err(e) => {
-                    let is_retryable = matches!(&e, MuError::AppleScript(msg) if msg.contains("(-54)"));
+                    let is_retryable =
+                        matches!(&e, MuError::AppleScript(msg) if msg.contains("(-54)"));
                     last_err = Some(e);
                     if !is_retryable {
                         break;
@@ -281,8 +283,7 @@ pub fn handle_sync(db_path: &Path) -> Result<()> {
 
     // Sync favorites
     let loved_ids = music::get_loved_track_ids()?;
-    let loved_set: std::collections::HashSet<&str> =
-        loved_ids.iter().map(String::as_str).collect();
+    let loved_set: std::collections::HashSet<&str> = loved_ids.iter().map(String::as_str).collect();
 
     let mut stmt = conn.prepare(
         "SELECT id, apple_music_id, COALESCE(favorite, 0) FROM tracks WHERE apple_music_id IS NOT NULL",
@@ -307,12 +308,13 @@ pub fn handle_sync(db_path: &Path) -> Result<()> {
 
     // Sync play counts
     let play_counts = music::get_play_counts()?;
-    let count_map: std::collections::HashMap<&str, i64> =
-        play_counts.iter().map(|(id, c)| (id.as_str(), *c)).collect();
+    let count_map: std::collections::HashMap<&str, i64> = play_counts
+        .iter()
+        .map(|(id, c)| (id.as_str(), *c))
+        .collect();
 
-    let mut stmt = conn.prepare(
-        "SELECT id, apple_music_id FROM tracks WHERE apple_music_id IS NOT NULL",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT id, apple_music_id FROM tracks WHERE apple_music_id IS NOT NULL")?;
     let id_tracks: Vec<(i64, String)> = stmt
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
